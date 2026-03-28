@@ -1,0 +1,202 @@
+"""Prompt construction and LLM interaction for Aurora Q&A."""
+
+import logging
+
+import anthropic
+
+from data import DataStore, MemberProfile
+from models import AskResponse, ResponseMetadata
+
+logger = logging.getLogger(__name__)
+
+MODEL = "claude-haiku-4-5-20251001"
+
+ANSWER_TOOL = {
+    "name": "answer_question",
+    "description": "Provide a structured answer to the member question.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "answer": {
+                "type": "string",
+                "description": "Concise answer to the question.",
+            },
+            "confidence": {
+                "type": "number",
+                "description": "Confidence score 0.0-1.0 per the rubric.",
+            },
+            "sources": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Source IDs supporting the answer.",
+            },
+            "reasoning": {
+                "type": "string",
+                "description": "Step-by-step: member resolution -> evidence -> conclusion.",
+            },
+        },
+        "required": ["answer", "confidence", "sources", "reasoning"],
+    },
+}
+
+
+_STOPWORDS = frozenset({
+    "the", "and", "for", "but", "not", "you", "all", "can", "had", "her",
+    "was", "one", "our", "his", "has", "are", "who", "how", "what", "when",
+    "where", "why", "does", "did", "been", "have", "this", "that", "with",
+    "from", "they", "will", "would", "could", "should", "about", "which",
+    "their", "there", "than", "then", "them", "each", "make", "like",
+    "just", "over", "such", "take", "also", "most", "into", "some",
+})
+
+
+def _resolve_member(question: str, member_names: list[str]) -> str | None:
+    """Best-effort fuzzy match of a member name from the question."""
+    words = [
+        w.removesuffix("'s").removesuffix("\u2019s").strip(".,!?;:").lower()
+        for w in question.split()
+    ]
+    words = [w for w in words if len(w) >= 3 and w not in _STOPWORDS]
+
+    best, best_score = None, 0
+    for name in member_names:
+        for part in name.lower().split():
+            part = part.strip("-")
+            for w in words:
+                if w == part:
+                    score = 3
+                elif len(w) >= 3 and len(part) >= 3 and w[:3] == part[:3]:
+                    score = 2
+                else:
+                    continue
+                if score > best_score:
+                    best, best_score = name, score
+    return best if best_score >= 2 else None
+
+
+def _build_system_prompt(concierge_summary: str) -> str:
+    return f"""You are Aurora's concierge assistant. Answer questions about members using ONLY the provided data.
+
+## Concierge Context
+{concierge_summary}
+
+## Instructions
+1. The user message tells you which member was resolved and provides their data. The resolution uses fuzzy name matching, so the name in the question may differ slightly from the member's actual name (e.g., "Amira" matches "Amina"). Trust the resolution and answer using the resolved member's data.
+2. Search the member's data for relevant evidence.
+3. Answer using ONLY the provided data. Never fabricate information.
+4. Rate confidence per this rubric:
+   - 1.0 = direct quote or explicit statement in the data
+   - 0.7-0.9 = inferred from multiple data points
+   - 0.3-0.6 = weak or indirect evidence
+   - 0.0 = no matching member or no relevant data
+5. Cite source IDs (message IDs, event IDs, stream IDs) for every claim.
+6. In reasoning, trace: member resolution -> evidence found -> conclusion.
+
+## Edge Cases
+- If the user message says no member was resolved: confidence 0.0, explain in answer.
+- Member found but no relevant data for the question: confidence 0.0, explain.
+
+Always use the answer_question tool to respond."""
+
+
+def _format_member_data(member: MemberProfile) -> str:
+    """Format a member's full data as compact text for context-stuffing."""
+    sections = [f"## Data for {member.user_name}"]
+
+    if member.messages:
+        sections.append(f"\n### Messages ({len(member.messages)})")
+        for m in member.messages:
+            sections.append(f"[{m['id']}] {m['timestamp']}: {m['message']}")
+
+    if member.calendar:
+        sections.append(f"\n### Calendar ({len(member.calendar)})")
+        for e in member.calendar:
+            attendees = ", ".join(e.get("attendees", []))
+            sections.append(
+                f"[{e['id']}] {e['start']} - {e['end']} | {e['title']}"
+                f" | {e.get('location', '')} | attendees: {attendees}"
+                f" | {e.get('notes', '')}"
+            )
+
+    if member.spotify:
+        sections.append(f"\n### Spotify ({len(member.spotify)})")
+        for s in member.spotify:
+            sections.append(
+                f"[{s['stream_id']}] {s['timestamp']}"
+                f" | {s['title']} | {s.get('artist_or_show', '')}"
+                f" | {s.get('context', '')}"
+            )
+
+    if member.whoop:
+        sections.append(f"\n### Health/Whoop ({len(member.whoop)})")
+        for w in member.whoop:
+            r = w.get("recovery", {})
+            sl = w.get("sleep", {})
+            st = w.get("strain", {})
+            sections.append(
+                f"[whoop_{w['date']}] Recovery: {r.get('score')}"
+                f" | HRV: {r.get('hrv_ms')}ms | RHR: {r.get('rhr_bpm')}bpm"
+                f" | Sleep: {sl.get('duration_hours')}h (quality: {sl.get('quality_score')})"
+                f" | Strain: {st.get('score')} | Steps: {st.get('steps')}"
+            )
+
+    if not any([member.messages, member.calendar, member.spotify, member.whoop]):
+        sections.append("\nNo data available for this member.")
+
+    return "\n".join(sections)
+
+
+async def ask(question: str, store: DataStore) -> AskResponse:
+    """Answer a question using member data and a single Haiku call."""
+    member_names = list(store.members.keys())
+    resolved = _resolve_member(question, member_names)
+    member = store.members.get(resolved) if resolved else None
+
+    system = _build_system_prompt(store.concierge.summary)
+
+    user_parts = [f"Question: {question}"]
+    if member:
+        user_parts.append(f"Resolved member: {member.user_name}")
+        user_parts.append(_format_member_data(member))
+    else:
+        names = ", ".join(sorted(member_names))
+        user_parts.append(
+            f"No member could be resolved from the question."
+            f" Known members: {names}"
+        )
+
+    client = anthropic.AsyncAnthropic()
+    try:
+        response = await client.messages.create(
+            model=MODEL,
+            max_tokens=1024,
+            system=system,
+            messages=[{"role": "user", "content": "\n\n".join(user_parts)}],
+            tools=[ANSWER_TOOL],
+            tool_choice={"type": "tool", "name": "answer_question"},
+        )
+    except Exception as exc:
+        logger.exception("LLM call failed")
+        return AskResponse(
+            answer="Sorry, I couldn't process that question right now.",
+            confidence=0.0,
+            sources=[],
+            metadata=ResponseMetadata(reasoning="Internal error processing the question."),
+        )
+
+    for block in response.content:
+        if block.type == "tool_use":
+            args = block.input
+            return AskResponse(
+                answer=args["answer"],
+                confidence=max(0.0, min(1.0, args["confidence"])),
+                sources=args["sources"],
+                metadata=ResponseMetadata(reasoning=args["reasoning"]),
+            )
+
+    return AskResponse(
+        answer="Unable to process the question.",
+        confidence=0.0,
+        sources=[],
+        metadata=ResponseMetadata(reasoning="LLM did not return a tool call."),
+    )
