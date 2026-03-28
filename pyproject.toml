@@ -8,6 +8,7 @@ dependencies = [
     "uvicorn[standard]~=0.34",
     "anthropic~=0.52",
     "httpx~=0.28",
+    "python-dotenv~=1.1",
 ]
 
 [tool.pytest.ini_options]
