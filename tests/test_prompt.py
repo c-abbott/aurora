@@ -1,10 +1,11 @@
-from unittest.mock import AsyncMock, patch
+import json
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from data import ConciergeProfile, DataStore, MemberProfile
 from models import AskResponse, ResponseMetadata
-from prompt import _build_system_prompt, _format_member_data, _resolve_member, ask, ANSWER_TOOL
+from prompt import _build_system_prompt, _format_member_data, _resolve_member, ask, RESPONSE_SCHEMA
 
 MEMBERS = [
     "Sophia Al-Farsi",
@@ -159,34 +160,31 @@ def _make_store() -> DataStore:
     return store
 
 
-def _mock_tool_response(answer: str, confidence: float, sources: list[str], reasoning: str):
-    """Create a mock Anthropic response with a tool_use block."""
-    block = AsyncMock()
-    block.type = "tool_use"
-    block.input = {
+def _mock_json_response(answer: str, confidence: float, sources: list[str], reasoning: str):
+    """Create a mock Gemini response with structured JSON output."""
+    response = MagicMock()
+    response.text = json.dumps({
         "answer": answer,
         "confidence": confidence,
         "sources": sources,
         "reasoning": reasoning,
-    }
-    response = AsyncMock()
-    response.content = [block]
+    })
     return response
 
 
 @pytest.mark.asyncio
 async def test_ask_returns_structured_response():
     store = _make_store()
-    mock_response = _mock_tool_response(
+    mock_response = _mock_json_response(
         answer="Chez Janou",
         confidence=0.95,
         sources=["msg_1"],
         reasoning="Resolved Alice. Found restaurant mention.",
     )
 
-    mock_client = AsyncMock()
-    mock_client.messages.create = AsyncMock(return_value=mock_response)
-    with patch("prompt.anthropic.AsyncAnthropic", return_value=mock_client):
+    mock_client = MagicMock()
+    mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+    with patch("prompt.genai.Client", return_value=mock_client):
         result = await ask("What is Alice's favorite restaurant?", store)
 
     assert isinstance(result, AskResponse)
@@ -199,16 +197,16 @@ async def test_ask_returns_structured_response():
 @pytest.mark.asyncio
 async def test_ask_unknown_member():
     store = _make_store()
-    mock_response = _mock_tool_response(
+    mock_response = _mock_json_response(
         answer="No matching member found.",
         confidence=0.0,
         sources=[],
         reasoning="Could not resolve 'Zara' to any known member.",
     )
 
-    mock_client = AsyncMock()
-    mock_client.messages.create = AsyncMock(return_value=mock_response)
-    with patch("prompt.anthropic.AsyncAnthropic", return_value=mock_client):
+    mock_client = MagicMock()
+    mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+    with patch("prompt.genai.Client", return_value=mock_client):
         result = await ask("What does Zara like?", store)
 
     assert result.confidence == 0.0
@@ -217,13 +215,13 @@ async def test_ask_unknown_member():
 @pytest.mark.asyncio
 async def test_ask_clamps_confidence():
     store = _make_store()
-    mock_response = _mock_tool_response(
+    mock_response = _mock_json_response(
         answer="Test", confidence=1.5, sources=[], reasoning="Test",
     )
 
-    mock_client = AsyncMock()
-    mock_client.messages.create = AsyncMock(return_value=mock_response)
-    with patch("prompt.anthropic.AsyncAnthropic", return_value=mock_client):
+    mock_client = MagicMock()
+    mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+    with patch("prompt.genai.Client", return_value=mock_client):
         result = await ask("What does Alice like?", store)
 
     assert result.confidence == 1.0
@@ -233,9 +231,9 @@ async def test_ask_clamps_confidence():
 async def test_ask_handles_llm_error():
     store = _make_store()
 
-    mock_client = AsyncMock()
-    mock_client.messages.create = AsyncMock(side_effect=RuntimeError("API down"))
-    with patch("prompt.anthropic.AsyncAnthropic", return_value=mock_client):
+    mock_client = MagicMock()
+    mock_client.aio.models.generate_content = AsyncMock(side_effect=RuntimeError("API down"))
+    with patch("prompt.genai.Client", return_value=mock_client):
         result = await ask("What does Alice like?", store)
 
     assert result.confidence == 0.0
@@ -243,17 +241,16 @@ async def test_ask_handles_llm_error():
 
 
 @pytest.mark.asyncio
-async def test_ask_no_tool_use_fallback():
+async def test_ask_handles_malformed_json():
     store = _make_store()
-    block = AsyncMock()
-    block.type = "text"
-    response = AsyncMock()
-    response.content = [block]
 
-    mock_client = AsyncMock()
-    mock_client.messages.create = AsyncMock(return_value=response)
-    with patch("prompt.anthropic.AsyncAnthropic", return_value=mock_client):
+    response = MagicMock()
+    response.text = "not valid json"
+
+    mock_client = MagicMock()
+    mock_client.aio.models.generate_content = AsyncMock(return_value=response)
+    with patch("prompt.genai.Client", return_value=mock_client):
         result = await ask("What does Alice like?", store)
 
     assert result.confidence == 0.0
-    assert "did not return a tool call" in result.metadata.reasoning
+    assert "unparseable" in result.metadata.reasoning

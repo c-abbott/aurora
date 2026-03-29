@@ -1,6 +1,7 @@
 """Integration tests for the POST /ask endpoint."""
 
-from unittest.mock import AsyncMock, patch
+import json
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -27,17 +28,14 @@ def _make_store() -> DataStore:
     return store
 
 
-def _mock_tool_response(answer, confidence, sources, reasoning):
-    block = AsyncMock()
-    block.type = "tool_use"
-    block.input = {
+def _mock_json_response(answer, confidence, sources, reasoning):
+    resp = MagicMock()
+    resp.text = json.dumps({
         "answer": answer,
         "confidence": confidence,
         "sources": sources,
         "reasoning": reasoning,
-    }
-    resp = AsyncMock()
-    resp.content = [block]
+    })
     return resp
 
 
@@ -54,16 +52,16 @@ def inject_store(store):
 
 @pytest.mark.asyncio
 async def test_ask_happy_path(store):
-    mock_response = _mock_tool_response(
+    mock_response = _mock_json_response(
         answer="Chez Janou in Paris.",
         confidence=0.9,
         sources=["msg_1", "msg_2"],
         reasoning="Resolved Alice. Found two restaurant mentions.",
     )
-    mock_client = AsyncMock()
-    mock_client.messages.create = AsyncMock(return_value=mock_response)
+    mock_client = MagicMock()
+    mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
 
-    with patch("prompt.anthropic.AsyncAnthropic", return_value=mock_client):
+    with patch("prompt.genai.Client", return_value=mock_client):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.post("/ask", json={"question": "What is Alice's favorite restaurant?"})
 
@@ -77,16 +75,16 @@ async def test_ask_happy_path(store):
 
 @pytest.mark.asyncio
 async def test_ask_unknown_member(store):
-    mock_response = _mock_tool_response(
+    mock_response = _mock_json_response(
         answer="No member named 'Zara' was found.",
         confidence=0.0,
         sources=[],
         reasoning="Could not resolve 'Zara' to any known member.",
     )
-    mock_client = AsyncMock()
-    mock_client.messages.create = AsyncMock(return_value=mock_response)
+    mock_client = MagicMock()
+    mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
 
-    with patch("prompt.anthropic.AsyncAnthropic", return_value=mock_client):
+    with patch("prompt.genai.Client", return_value=mock_client):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.post("/ask", json={"question": "What does Zara like?"})
 
@@ -97,16 +95,16 @@ async def test_ask_unknown_member(store):
 
 @pytest.mark.asyncio
 async def test_ask_no_relevant_data(store):
-    mock_response = _mock_tool_response(
+    mock_response = _mock_json_response(
         answer="No information about Bob's music preferences was found.",
         confidence=0.0,
         sources=[],
         reasoning="Resolved Bob. Searched messages but found no music-related data.",
     )
-    mock_client = AsyncMock()
-    mock_client.messages.create = AsyncMock(return_value=mock_response)
+    mock_client = MagicMock()
+    mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
 
-    with patch("prompt.anthropic.AsyncAnthropic", return_value=mock_client):
+    with patch("prompt.genai.Client", return_value=mock_client):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.post("/ask", json={"question": "What music does Bob listen to?"})
 
