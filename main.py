@@ -19,12 +19,12 @@ async def lifespan(app: FastAPI):
     t0 = time.monotonic()
     app.state.data = await load_all()
     logger.info("Data loaded in %.2fs", time.monotonic() - t0)
-    t1 = time.monotonic()
-    await build_index(app.state.data, project=PROJECT, location=LOCATION)
-    logger.info("Index built in %.2fs", time.monotonic() - t1)
     app.state.genai_client = genai.Client(
         vertexai=True, project=PROJECT, location=LOCATION
     )
+    t1 = time.monotonic()
+    await build_index(app.state.data, client=app.state.genai_client)
+    logger.info("Index built in %.2fs", time.monotonic() - t1)
     yield
 
 

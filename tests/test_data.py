@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -242,8 +242,7 @@ async def test_build_index_embeds_all_items():
     mock_client = MagicMock()
     mock_client.aio.models.embed_content = AsyncMock(return_value=mock_embed_response)
 
-    with patch("data.genai.Client", return_value=mock_client):
-        await build_index(store, project="test", location="test")
+    await build_index(store, client=mock_client)
 
     assert len(store.members["Alice"].items) == 2
     for item in store.members["Alice"].items:

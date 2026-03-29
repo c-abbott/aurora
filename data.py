@@ -70,14 +70,22 @@ async def _fetch_me(client: httpx.AsyncClient) -> ConciergeProfile:
 
 
 async def load_all() -> DataStore:
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        concierge, messages, calendar, spotify, whoop = await asyncio.gather(
-            _fetch_me(client),
-            _fetch_paginated(client, "/messages/"),
-            _fetch_paginated(client, "/hackathon/calendar-events/"),
-            _fetch_paginated(client, "/hackathon/spotify/"),
-            _fetch_paginated(client, "/hackathon/whoop/"),
-        )
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                concierge, messages, calendar, spotify, whoop = await asyncio.gather(
+                    _fetch_me(client),
+                    _fetch_paginated(client, "/messages/"),
+                    _fetch_paginated(client, "/hackathon/calendar-events/"),
+                    _fetch_paginated(client, "/hackathon/spotify/"),
+                    _fetch_paginated(client, "/hackathon/whoop/"),
+                )
+            break
+        except (httpx.HTTPError, httpx.TimeoutException):
+            if attempt == 2:
+                raise
+            logger.warning("Data fetch attempt %d failed, retrying...", attempt + 1)
+            await asyncio.sleep(1)
 
     store = DataStore(concierge=concierge)
 
@@ -169,10 +177,8 @@ EMBED_MODEL = "text-embedding-005"
 EMBED_BATCH_SIZE = 250
 
 
-async def build_index(store: DataStore, project: str, location: str) -> None:
+async def build_index(store: DataStore, client: genai.Client) -> None:
     """Embed all data items and attach pre-normalized vectors to the DataStore."""
-    client = genai.Client(vertexai=True, project=project, location=location)
-
     all_items: list[DataItem] = []
     for member in store.members.values():
         member.items = _render_items(member)
