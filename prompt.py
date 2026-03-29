@@ -1,42 +1,43 @@
 """Prompt construction and LLM interaction for Aurora Q&A."""
 
+import json
 import logging
+import os
 
-import anthropic
+from google import genai
+from google.genai.types import GenerateContentConfig
 
 from data import DataStore, MemberProfile
 from models import AskResponse, ResponseMetadata
 
 logger = logging.getLogger(__name__)
 
-MODEL = "claude-haiku-4-5-20251001"
+MODEL = "gemini-2.5-flash"
+PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", "aurora-491618")
+LOCATION = os.environ.get("GOOGLE_CLOUD_LOCATION", "europe-west1")
 
-ANSWER_TOOL = {
-    "name": "answer_question",
-    "description": "Provide a structured answer to the member question.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "answer": {
-                "type": "string",
-                "description": "Concise answer to the question.",
-            },
-            "confidence": {
-                "type": "number",
-                "description": "Confidence score 0.0-1.0 per the rubric.",
-            },
-            "sources": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Source IDs supporting the answer.",
-            },
-            "reasoning": {
-                "type": "string",
-                "description": "Step-by-step: member resolution -> evidence -> conclusion.",
-            },
+RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "answer": {
+            "type": "string",
+            "description": "Concise answer to the question.",
         },
-        "required": ["answer", "confidence", "sources", "reasoning"],
+        "confidence": {
+            "type": "number",
+            "description": "Confidence score 0.0-1.0 per the rubric.",
+        },
+        "sources": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Source IDs supporting the answer.",
+        },
+        "reasoning": {
+            "type": "string",
+            "description": "Step-by-step: member resolution -> evidence -> conclusion.",
+        },
     },
+    "required": ["answer", "confidence", "sources", "reasoning"],
 }
 
 
@@ -147,7 +148,7 @@ def _format_member_data(member: MemberProfile) -> str:
 
 
 async def ask(question: str, store: DataStore) -> AskResponse:
-    """Answer a question using member data and a single Haiku call."""
+    """Answer a question using member data and a single Gemini call."""
     member_names = list(store.members.keys())
     resolved = _resolve_member(question, member_names)
     member = store.members.get(resolved) if resolved else None
@@ -165,17 +166,19 @@ async def ask(question: str, store: DataStore) -> AskResponse:
             f" Known members: {names}"
         )
 
-    client = anthropic.AsyncAnthropic()
+    client = genai.Client(vertexai=True, project=PROJECT, location=LOCATION)
     try:
-        response = await client.messages.create(
+        response = await client.aio.models.generate_content(
             model=MODEL,
-            max_tokens=1024,
-            system=system,
-            messages=[{"role": "user", "content": "\n\n".join(user_parts)}],
-            tools=[ANSWER_TOOL],
-            tool_choice={"type": "tool", "name": "answer_question"},
+            contents="\n\n".join(user_parts),
+            config=GenerateContentConfig(
+                system_instruction=system,
+                response_mime_type="application/json",
+                response_schema=RESPONSE_SCHEMA,
+                max_output_tokens=4096,
+            ),
         )
-    except Exception as exc:
+    except Exception:
         logger.exception("LLM call failed")
         return AskResponse(
             answer="Sorry, I couldn't process that question right now.",
@@ -184,19 +187,20 @@ async def ask(question: str, store: DataStore) -> AskResponse:
             metadata=ResponseMetadata(reasoning="Internal error processing the question."),
         )
 
-    for block in response.content:
-        if block.type == "tool_use":
-            args = block.input
-            return AskResponse(
-                answer=args["answer"],
-                confidence=max(0.0, min(1.0, args["confidence"])),
-                sources=args["sources"],
-                metadata=ResponseMetadata(reasoning=args["reasoning"]),
-            )
-
-    return AskResponse(
-        answer="Unable to process the question.",
-        confidence=0.0,
-        sources=[],
-        metadata=ResponseMetadata(reasoning="LLM did not return a tool call."),
-    )
+    try:
+        text = response.text
+        args = json.loads(text)
+        return AskResponse(
+            answer=args["answer"],
+            confidence=max(0.0, min(1.0, float(args["confidence"]))),
+            sources=list(args.get("sources", [])),
+            metadata=ResponseMetadata(reasoning=args["reasoning"]),
+        )
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        logger.warning("Failed to parse LLM response: %s", exc)
+        return AskResponse(
+            answer="Unable to process the question.",
+            confidence=0.0,
+            sources=[],
+            metadata=ResponseMetadata(reasoning="LLM returned an unparseable response."),
+        )

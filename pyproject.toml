@@ -6,9 +6,8 @@ requires-python = ">=3.12"
 dependencies = [
     "fastapi~=0.115",
     "uvicorn[standard]~=0.34",
-    "anthropic~=0.52",
+    "google-genai~=1.0",
     "httpx~=0.28",
-    "python-dotenv~=1.1",
 ]
 
 [tool.pytest.ini_options]
