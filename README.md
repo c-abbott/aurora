@@ -43,30 +43,42 @@ A question-answering service for Aurora's concierge platform. Takes natural lang
 
 Full rationale in [`docs/design-decisions.md`](docs/design-decisions.md).
 
-## API
-
-### `POST /ask`
+## Try it
 
 ```bash
-curl -X POST https://aurora-1052079892687.europe-west1.run.app/ask \
+# Health check
+curl https://aurora-1052079892687.europe-west1.run.app/health
+
+# Precision — specific facts from dense message history
+curl -s -X POST https://aurora-1052079892687.europe-west1.run.app/ask \
   -H "Content-Type: application/json" \
-  -d '{"question": "What music does James listen to while working out?"}'
+  -d '{"question": "What specific wine did Sophia ask about?"}' | python3 -m json.tool
+
+# Cross-source — Spotify data matched to the right member
+curl -s -X POST https://aurora-1052079892687.europe-west1.run.app/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What music does James listen to while working out?"}' | python3 -m json.tool
+
+# Fuzzy matching — "Soph" resolves to "Sophia Al-Farsi"
+curl -s -X POST https://aurora-1052079892687.europe-west1.run.app/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question": "Has Soph mentioned any restaurants?"}' | python3 -m json.tool
+
+# Self-reference — "my" resolves to the concierge (James Fletcher)
+curl -s -X POST https://aurora-1052079892687.europe-west1.run.app/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question": "How many steps did I take last week?"}' | python3 -m json.tool
+
+# No data — correct 0.0 confidence, no hallucination
+curl -s -X POST https://aurora-1052079892687.europe-west1.run.app/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What is Sophia'\''s blood type?"}' | python3 -m json.tool
+
+# Unknown member — correct 0.0 confidence
+curl -s -X POST https://aurora-1052079892687.europe-west1.run.app/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What does Zara like to eat?"}' | python3 -m json.tool
 ```
-
-```json
-{
-  "answer": "James Fletcher listens to a variety of songs while strength training, including \"Numb/Encore\" by Jay-Z & Linkin Park, \"No Role Modelz\" by J. Cole, \"Till I Collapse\" by Eminem, and \"N95\" and \"DNA.\" by Kendrick Lamar.",
-  "confidence": 1.0,
-  "sources": ["sp_00055", "sp_00101", "sp_00310", "sp_00054", "sp_00100"],
-  "metadata": {
-    "reasoning": "The user asked about James Fletcher's workout music. The retrieved data contains several Spotify entries explicitly listing songs played during 'Strength Training', directly answering the question."
-  }
-}
-```
-
-### `GET /health`
-
-Returns `200 {"status": "healthy", "members": 10}` when data is loaded, `503` otherwise.
 
 ## Running locally
 
