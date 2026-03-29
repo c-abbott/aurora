@@ -5,14 +5,17 @@ import logging
 import os
 
 from google import genai
-from google.genai.types import GenerateContentConfig
+from google.genai import types as genai_types
+from google.genai.types import GenerateContentConfig, ThinkingConfig
 
-from data import DataStore, MemberProfile
+from data import DataItem, DataStore, MemberProfile, normalize
 from models import AskResponse, ResponseMetadata
 
 logger = logging.getLogger(__name__)
 
 MODEL = "gemini-2.5-flash"
+EMBED_MODEL = "text-embedding-005"
+TOP_K = 15
 PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", "aurora-491618")
 LOCATION = os.environ.get("GOOGLE_CLOUD_LOCATION", "europe-west1")
 
@@ -21,7 +24,7 @@ RESPONSE_SCHEMA = {
     "properties": {
         "answer": {
             "type": "string",
-            "description": "Concise answer to the question.",
+            "description": "1-2 sentence answer.",
         },
         "confidence": {
             "type": "number",
@@ -30,11 +33,12 @@ RESPONSE_SCHEMA = {
         "sources": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "Source IDs supporting the answer.",
+            "maxItems": 5,
+            "description": "Up to 5 most relevant source IDs.",
         },
         "reasoning": {
             "type": "string",
-            "description": "Step-by-step: member resolution -> evidence -> conclusion.",
+            "description": "Brief trace (1-3 sentences): member resolution -> evidence -> conclusion.",
         },
     },
     "required": ["answer", "confidence", "sources", "reasoning"],
@@ -82,8 +86,8 @@ def _build_system_prompt(concierge_summary: str) -> str:
 {concierge_summary}
 
 ## Instructions
-1. The user message tells you which member was resolved and provides their data. The resolution uses fuzzy name matching, so the name in the question may differ slightly from the member's actual name (e.g., "Amira" matches "Amina"). Trust the resolution and answer using the resolved member's data.
-2. Search the member's data for relevant evidence.
+1. The user message tells you which member was resolved and provides their data, filtered for relevance to the question. The resolution uses fuzzy name matching, so the name in the question may differ slightly from the member's actual name (e.g., "Amira" matches "Amina"). Trust the resolution and answer using the resolved member's data.
+2. The provided data items are the most relevant to the question, retrieved via semantic search. Search them carefully for evidence.
 3. Answer using ONLY the provided data. Never fabricate information.
 4. Rate confidence per this rubric:
    - 1.0 = direct quote or explicit statement in the data
@@ -91,7 +95,7 @@ def _build_system_prompt(concierge_summary: str) -> str:
    - 0.3-0.6 = weak or indirect evidence
    - 0.0 = no matching member or no relevant data
 5. Cite source IDs (message IDs, event IDs, stream IDs) for every claim.
-6. In reasoning, trace: member resolution -> evidence found -> conclusion.
+6. Keep reasoning to 1-3 sentences: member resolution -> evidence -> conclusion.
 
 ## Edge Cases
 - If the user message says no member was resolved: confidence 0.0, explain in answer.
@@ -147,6 +151,38 @@ def _format_member_data(member: MemberProfile) -> str:
     return "\n".join(sections)
 
 
+def _dot_product(a: list[float], b: list[float]) -> float:
+    return sum(x * y for x, y in zip(a, b))
+
+
+async def _retrieve(
+    question: str,
+    member: MemberProfile,
+    client: genai.Client,
+) -> list[DataItem]:
+    """Embed the question and return the top-K most relevant member items."""
+    response = await client.aio.models.embed_content(
+        model=EMBED_MODEL,
+        contents=question,
+        config=genai_types.EmbedContentConfig(task_type="RETRIEVAL_QUERY"),
+    )
+    query_vec = normalize(response.embeddings[0].values)
+
+    scored = [(item, _dot_product(query_vec, item.vector)) for item in member.items]
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [item for item, _ in scored[:TOP_K]]
+
+
+def _format_retrieved_data(member_name: str, items: list[DataItem]) -> str:
+    """Format a retrieved subset of items for the LLM prompt."""
+    sections = [f"## Retrieved data for {member_name} ({len(items)} items by relevance)"]
+    for item in items:
+        sections.append(item.text)
+    if not items:
+        sections.append("\nNo data available for this member.")
+    return "\n".join(sections)
+
+
 async def ask(question: str, store: DataStore) -> AskResponse:
     """Answer a question using member data and a single Gemini call."""
     member_names = list(store.members.keys())
@@ -155,18 +191,26 @@ async def ask(question: str, store: DataStore) -> AskResponse:
 
     system = _build_system_prompt(store.concierge.summary)
 
+    client = genai.Client(vertexai=True, project=PROJECT, location=LOCATION)
+
     user_parts = [f"Question: {question}"]
     if member:
         user_parts.append(f"Resolved member: {member.user_name}")
-        user_parts.append(_format_member_data(member))
+        if member.items:
+            try:
+                retrieved = await _retrieve(question, member, client)
+                user_parts.append(_format_retrieved_data(member.user_name, retrieved))
+            except Exception:
+                logger.warning("Embedding query failed, falling back to full context", exc_info=True)
+                user_parts.append(_format_member_data(member))
+        else:
+            user_parts.append(_format_member_data(member))
     else:
         names = ", ".join(sorted(member_names))
         user_parts.append(
             f"No member could be resolved from the question."
             f" Known members: {names}"
         )
-
-    client = genai.Client(vertexai=True, project=PROJECT, location=LOCATION)
     try:
         response = await client.aio.models.generate_content(
             model=MODEL,
@@ -175,7 +219,8 @@ async def ask(question: str, store: DataStore) -> AskResponse:
                 system_instruction=system,
                 response_mime_type="application/json",
                 response_schema=RESPONSE_SCHEMA,
-                max_output_tokens=4096,
+                max_output_tokens=8192,
+                thinking_config=ThinkingConfig(thinking_budget=0),
             ),
         )
     except Exception:

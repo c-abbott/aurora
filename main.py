@@ -5,9 +5,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from starlette.requests import Request
 
-from data import load_all
+from data import build_index, load_all
 from models import AskRequest, AskResponse
-from prompt import ask as answer_question
+from prompt import PROJECT, LOCATION, ask as answer_question
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +17,9 @@ async def lifespan(app: FastAPI):
     t0 = time.monotonic()
     app.state.data = await load_all()
     logger.info("Data loaded in %.2fs", time.monotonic() - t0)
+    t1 = time.monotonic()
+    await build_index(app.state.data, project=PROJECT, location=LOCATION)
+    logger.info("Index built in %.2fs", time.monotonic() - t1)
     yield
 
 

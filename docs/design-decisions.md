@@ -6,11 +6,13 @@
 
 **Why:** The full dataset is ~500KB (3,349 messages, 154 calendar events, 338 spotify streams, 31 whoop records). Redis or SQLite add deployment complexity for a persistence problem that doesn't exist at this scale. Startup re-fetch takes <10 seconds and avoids stale cache bugs.
 
-## 2. Context-stuffing over embeddings/RAG
+## 2. RAG with in-memory vector index
 
-**Decision:** Filter messages by member, pass their entire history to the LLM. No vector embeddings.
+**Decision:** Embed all data items at startup using `text-embedding-005`, retrieve top-30 items per query via cosine similarity.
 
-**Why:** ~335 messages per user = ~8K tokens. Fits comfortably in context. Embeddings are a lossy retrieval step — top-K can miss the message containing the answer. The eval scores **precision**, so giving the LLM every message maximizes the chance of a correct answer. Embeddings are discussed in the README as the scaling strategy for 100K+ members.
+**Why:** Context-stuffing the concierge member's full profile (~500+ items across messages, calendar, spotify, whoop) caused 30% malformed JSON responses and 4-18s latency. RAG reduces context to ~30 items, bringing latency under 2s and eliminating parse failures. Pre-normalized vectors enable pure-Python dot-product similarity with no external dependencies.
+
+**Trade-off:** Top-K retrieval is lossy — the answer might not be in the top 30. Mitigated by strong semantic matching and per-member item counts (~335 messages, where K=30 captures ~9%). Falls back to full context-stuffing if the embedding API fails at query time.
 
 ## 3. Single LLM call (entity resolution + answer combined)
 
@@ -18,17 +20,17 @@
 
 **Why:** Two sequential calls would consume ~2 seconds (the full latency budget). Combining them into one call halves latency. The member list is only 10 names (~50 tokens of overhead). The reasoning trace captures the resolution step for traceability.
 
-## 4. Claude Haiku 3.5
+## 4. Gemini 2.5 Flash on Vertex AI
 
-**Decision:** Use Haiku 3.5 over Sonnet/Opus/GPT-4o.
+**Decision:** Use Gemini 2.5 Flash via Vertex AI over Claude Haiku / GPT-4o.
 
-**Why:** This is reading comprehension over ~8K tokens, not complex reasoning. Haiku is fast (~1s), cheap, and sufficient. Leaves headroom in the 2-second latency budget for network overhead.
+**Why:** Fast inference (~1s for small contexts), free tier on Vertex AI, and the google-genai SDK supports both generation and embeddings — one client for both RAG and answering. Application Default Credentials mean no API key management; Cloud Run's service account gets Vertex AI access via IAM.
 
-## 5. Tool use for structured output
+## 5. Structured JSON output mode
 
-**Decision:** Define the response schema as a tool, forcing Haiku to return structured JSON.
+**Decision:** Use `response_mime_type="application/json"` with a `response_schema` instead of function calling.
 
-**Why:** Guarantees valid JSON every time. No parsing logic, no retry on malformed output. Native to the Anthropic API.
+**Why:** Gemini's function calling produced `MALFORMED_FUNCTION_CALL` errors with large contexts. JSON output mode is more reliable and lets us define the exact schema. The response is parsed with `json.loads` and validated in Python.
 
 ## 6. Data-driven multi-source routing
 
