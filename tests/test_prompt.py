@@ -1,5 +1,5 @@
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -7,6 +7,7 @@ from data import ConciergeProfile, DataItem, DataStore, MemberProfile, normalize
 from models import AskResponse, ResponseMetadata
 from prompt import (
     RESPONSE_SCHEMA,
+    _SELF_REFERENCES,
     _build_system_prompt,
     _dot_product,
     _format_member_data,
@@ -64,6 +65,23 @@ def test_resolve_case_insensitive():
 def test_resolve_stopwords_ignored():
     # "the" should not match "El-Tahir", "can" should not match "Cavalli"
     assert _resolve_member("Can the person have this?", MEMBERS) is None
+
+
+def test_resolve_self_reference_my():
+    assert _resolve_member("What is my sleep score?", MEMBERS, concierge_name="James Fletcher") == "James Fletcher"
+
+
+def test_resolve_self_reference_me():
+    assert _resolve_member("Tell me about me", MEMBERS, concierge_name="James Fletcher") == "James Fletcher"
+
+
+def test_resolve_name_takes_priority_over_self_reference():
+    # "my" is a self-reference, but "Sophia" is an explicit name match
+    assert _resolve_member("What is my friend Sophia's favorite?", MEMBERS, concierge_name="James Fletcher") == "Sophia Al-Farsi"
+
+
+def test_resolve_self_reference_without_concierge():
+    assert _resolve_member("What is my sleep score?", MEMBERS) is None
 
 
 # -- Prompt formatting --
@@ -192,8 +210,7 @@ async def test_ask_returns_structured_response():
 
     mock_client = MagicMock()
     mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
-    with patch("prompt.genai.Client", return_value=mock_client):
-        result = await ask("What is Alice's favorite restaurant?", store)
+    result = await ask("What is Alice's favorite restaurant?", store, client=mock_client)
 
     assert isinstance(result, AskResponse)
     assert result.answer == "Chez Janou"
@@ -214,8 +231,7 @@ async def test_ask_unknown_member():
 
     mock_client = MagicMock()
     mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
-    with patch("prompt.genai.Client", return_value=mock_client):
-        result = await ask("What does Zara like?", store)
+    result = await ask("What does Zara like?", store, client=mock_client)
 
     assert result.confidence == 0.0
 
@@ -229,8 +245,7 @@ async def test_ask_clamps_confidence():
 
     mock_client = MagicMock()
     mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
-    with patch("prompt.genai.Client", return_value=mock_client):
-        result = await ask("What does Alice like?", store)
+    result = await ask("What does Alice like?", store, client=mock_client)
 
     assert result.confidence == 1.0
 
@@ -241,8 +256,7 @@ async def test_ask_handles_llm_error():
 
     mock_client = MagicMock()
     mock_client.aio.models.generate_content = AsyncMock(side_effect=RuntimeError("API down"))
-    with patch("prompt.genai.Client", return_value=mock_client):
-        result = await ask("What does Alice like?", store)
+    result = await ask("What does Alice like?", store, client=mock_client)
 
     assert result.confidence == 0.0
     assert "Internal error" in result.metadata.reasoning
@@ -257,8 +271,7 @@ async def test_ask_handles_malformed_json():
 
     mock_client = MagicMock()
     mock_client.aio.models.generate_content = AsyncMock(return_value=response)
-    with patch("prompt.genai.Client", return_value=mock_client):
-        result = await ask("What does Alice like?", store)
+    result = await ask("What does Alice like?", store, client=mock_client)
 
     assert result.confidence == 0.0
     assert "unparseable" in result.metadata.reasoning
@@ -338,8 +351,7 @@ async def test_ask_uses_retrieval_when_items_exist():
     mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
     mock_client.aio.models.embed_content = AsyncMock(return_value=mock_embed_response)
 
-    with patch("prompt.genai.Client", return_value=mock_client):
-        result = await ask("What is Alice's favorite restaurant?", store)
+    result = await ask("What is Alice's favorite restaurant?", store, client=mock_client)
 
     assert result.answer == "Chez Janou"
     mock_client.aio.models.embed_content.assert_called_once()
@@ -359,8 +371,26 @@ async def test_ask_falls_back_on_embed_failure():
     mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
     mock_client.aio.models.embed_content = AsyncMock(side_effect=RuntimeError("Embed API down"))
 
-    with patch("prompt.genai.Client", return_value=mock_client):
-        result = await ask("What is Alice's favorite restaurant?", store)
+    result = await ask("What is Alice's favorite restaurant?", store, client=mock_client)
 
     assert result.answer == "Chez Janou"
     assert result.confidence == 0.95
+
+
+@pytest.mark.asyncio
+async def test_ask_prompt_contains_member_data():
+    """Verify the prompt sent to the LLM includes resolved member and their data."""
+    store = _make_store()
+    mock_response = _mock_json_response(
+        answer="Test", confidence=0.5, sources=["msg_1"], reasoning="Test",
+    )
+
+    mock_client = MagicMock()
+    mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+    await ask("What is Alice's favorite restaurant?", store, client=mock_client)
+
+    call_args = mock_client.aio.models.generate_content.call_args
+    prompt_content = call_args.kwargs.get("contents") or call_args[1].get("contents", "")
+    assert "Resolved member: Alice" in prompt_content
+    assert "Chez Janou" in prompt_content
+    assert "msg_1" in prompt_content

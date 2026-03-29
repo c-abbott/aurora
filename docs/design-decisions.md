@@ -8,11 +8,13 @@
 
 ## 2. RAG with in-memory vector index
 
-**Decision:** Embed all data items at startup using `text-embedding-005`, retrieve top-30 items per query via cosine similarity.
+**Decision:** Embed all data items at startup using `text-embedding-005`, retrieve top-25 items per query via cosine similarity with source-type diversity.
 
-**Why:** Context-stuffing the concierge member's full profile (~500+ items across messages, calendar, spotify, whoop) caused 30% malformed JSON responses and 4-18s latency. RAG reduces context to ~30 items, bringing latency under 2s and eliminating parse failures. Pre-normalized vectors enable pure-Python dot-product similarity with no external dependencies.
+**Why:** Context-stuffing the concierge member's full profile (~500+ items across messages, calendar, spotify, whoop) caused 30% malformed JSON responses and 4-18s latency. RAG reduces context to ~25 items, bringing latency under 2s and eliminating parse failures. Pre-normalized vectors enable pure-Python dot-product similarity with no external dependencies.
 
-**Trade-off:** Top-K retrieval is lossy — the answer might not be in the top 30. Mitigated by strong semantic matching and per-member item counts (~335 messages, where K=30 captures ~9%). Falls back to full context-stuffing if the embedding API fails at query time.
+**Source-type diversity:** Retrieval guarantees at least one item from each data source (messages, calendar, spotify, whoop) before filling remaining slots by relevance score. This prevents high-volume sources (messages) from crowding out cross-source evidence.
+
+**Trade-off:** Top-K retrieval is lossy — the answer might not be in the top 25. Mitigated by strong semantic matching, source diversity, and per-member item counts (~335 messages, where K=25 captures ~7.5%). Falls back to full context-stuffing if the embedding API fails at query time.
 
 ## 3. Single LLM call (entity resolution + answer combined)
 

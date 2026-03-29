@@ -3,19 +3,19 @@
 import json
 import logging
 import os
+import re
 
 from google import genai
 from google.genai import types as genai_types
 from google.genai.types import GenerateContentConfig, ThinkingConfig
 
-from data import DataItem, DataStore, MemberProfile, normalize
+from data import EMBED_MODEL, DataItem, DataStore, MemberProfile, normalize
 from models import AskResponse, ResponseMetadata
 
 logger = logging.getLogger(__name__)
 
 MODEL = "gemini-2.5-flash"
-EMBED_MODEL = "text-embedding-005"
-TOP_K = 15
+TOP_K = 25
 PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", "aurora-491618")
 LOCATION = os.environ.get("GOOGLE_CLOUD_LOCATION", "europe-west1")
 
@@ -54,13 +54,17 @@ _STOPWORDS = frozenset({
     "just", "over", "such", "take", "also", "most", "into", "some",
 })
 
+_SELF_REFERENCES = frozenset({"my", "me", "i", "i'm", "i've", "mine", "myself"})
 
-def _resolve_member(question: str, member_names: list[str]) -> str | None:
+
+def _resolve_member(
+    question: str,
+    member_names: list[str],
+    concierge_name: str | None = None,
+) -> str | None:
     """Best-effort fuzzy match of a member name from the question."""
-    words = [
-        w.removesuffix("'s").removesuffix("\u2019s").strip(".,!?;:").lower()
-        for w in question.split()
-    ]
+    tokens = re.findall(r"[\w'\u2019]+", question.lower())
+    words = [t.removesuffix("'s").removesuffix("\u2019s") for t in tokens]
     words = [w for w in words if len(w) >= 3 and w not in _STOPWORDS]
 
     best, best_score = None, 0
@@ -76,7 +80,16 @@ def _resolve_member(question: str, member_names: list[str]) -> str | None:
                     continue
                 if score > best_score:
                     best, best_score = name, score
-    return best if best_score >= 2 else None
+
+    if best_score >= 2:
+        return best
+
+    # Fallback: self-references resolve to the concierge
+    if concierge_name and concierge_name in member_names:
+        if any(t in _SELF_REFERENCES for t in tokens):
+            return concierge_name
+
+    return None
 
 
 def _build_system_prompt(concierge_summary: str) -> str:
@@ -94,7 +107,7 @@ def _build_system_prompt(concierge_summary: str) -> str:
    - 0.7-0.9 = inferred from multiple data points
    - 0.3-0.6 = weak or indirect evidence
    - 0.0 = no matching member or no relevant data
-5. Cite source IDs (message IDs, event IDs, stream IDs) for every claim.
+5. Cite source IDs (message IDs, event IDs, stream IDs) for every claim. For confidence > 0.0, you MUST cite at least one source.
 6. Keep reasoning to 1-3 sentences: member resolution -> evidence -> conclusion.
 
 ## Edge Cases
@@ -160,7 +173,11 @@ async def _retrieve(
     member: MemberProfile,
     client: genai.Client,
 ) -> list[DataItem]:
-    """Embed the question and return the top-K most relevant member items."""
+    """Embed the question and return the top-K most relevant member items.
+
+    Ensures source-type diversity: the best item from each source type is
+    included before filling remaining slots by cosine similarity score.
+    """
     response = await client.aio.models.embed_content(
         model=EMBED_MODEL,
         contents=question,
@@ -170,7 +187,24 @@ async def _retrieve(
 
     scored = [(item, _dot_product(query_vec, item.vector)) for item in member.items]
     scored.sort(key=lambda x: x[1], reverse=True)
-    return [item for item, _ in scored[:TOP_K]]
+
+    # Ensure at least one item from each source type
+    result: list[DataItem] = []
+    seen_sources: set[str] = set()
+    remaining: list[DataItem] = []
+    for item, _ in scored:
+        if item.source not in seen_sources:
+            result.append(item)
+            seen_sources.add(item.source)
+        else:
+            remaining.append(item)
+
+    for item in remaining:
+        if len(result) >= TOP_K:
+            break
+        result.append(item)
+
+    return result[:TOP_K]
 
 
 def _format_retrieved_data(member_name: str, items: list[DataItem]) -> str:
@@ -183,15 +217,14 @@ def _format_retrieved_data(member_name: str, items: list[DataItem]) -> str:
     return "\n".join(sections)
 
 
-async def ask(question: str, store: DataStore) -> AskResponse:
+async def ask(question: str, store: DataStore, client: genai.Client) -> AskResponse:
     """Answer a question using member data and a single Gemini call."""
     member_names = list(store.members.keys())
-    resolved = _resolve_member(question, member_names)
+    concierge_name = store.concierge.name if store.concierge else None
+    resolved = _resolve_member(question, member_names, concierge_name)
     member = store.members.get(resolved) if resolved else None
 
     system = _build_system_prompt(store.concierge.summary)
-
-    client = genai.Client(vertexai=True, project=PROJECT, location=LOCATION)
 
     user_parts = [f"Question: {question}"]
     if member:
@@ -220,7 +253,7 @@ async def ask(question: str, store: DataStore) -> AskResponse:
                 response_mime_type="application/json",
                 response_schema=RESPONSE_SCHEMA,
                 max_output_tokens=8192,
-                thinking_config=ThinkingConfig(thinking_budget=0),
+                thinking_config=ThinkingConfig(thinking_budget=1024),
             ),
         )
     except Exception:

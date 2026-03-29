@@ -1,7 +1,7 @@
 """Integration tests for the POST /ask endpoint."""
 
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -60,10 +60,10 @@ async def test_ask_happy_path(store):
     )
     mock_client = MagicMock()
     mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+    app.state.genai_client = mock_client
 
-    with patch("prompt.genai.Client", return_value=mock_client):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            resp = await client.post("/ask", json={"question": "What is Alice's favorite restaurant?"})
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/ask", json={"question": "What is Alice's favorite restaurant?"})
 
     assert resp.status_code == 200
     body = resp.json()
@@ -83,10 +83,10 @@ async def test_ask_unknown_member(store):
     )
     mock_client = MagicMock()
     mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+    app.state.genai_client = mock_client
 
-    with patch("prompt.genai.Client", return_value=mock_client):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            resp = await client.post("/ask", json={"question": "What does Zara like?"})
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/ask", json={"question": "What does Zara like?"})
 
     assert resp.status_code == 200
     body = resp.json()
@@ -103,10 +103,10 @@ async def test_ask_no_relevant_data(store):
     )
     mock_client = MagicMock()
     mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+    app.state.genai_client = mock_client
 
-    with patch("prompt.genai.Client", return_value=mock_client):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            resp = await client.post("/ask", json={"question": "What music does Bob listen to?"})
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/ask", json={"question": "What music does Bob listen to?"})
 
     assert resp.status_code == 200
     body = resp.json()
@@ -153,9 +153,9 @@ async def test_ask_with_rag_items():
     mock_client.aio.models.embed_content = AsyncMock(return_value=mock_embed_response)
 
     app.state.data = store
-    with patch("prompt.genai.Client", return_value=mock_client):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            resp = await client.post("/ask", json={"question": "What is Alice's favorite restaurant?"})
+    app.state.genai_client = mock_client
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/ask", json={"question": "What is Alice's favorite restaurant?"})
 
     assert resp.status_code == 200
     assert resp.json()["answer"] == "Chez Janou in Paris."

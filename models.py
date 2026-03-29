@@ -2,7 +2,7 @@ from pydantic import BaseModel, Field
 
 
 class AskRequest(BaseModel):
-    question: str
+    question: str = Field(max_length=1000)
 
 
 class ResponseMetadata(BaseModel):
