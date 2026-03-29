@@ -16,17 +16,17 @@
 
 **Trade-off:** Top-K retrieval is lossy — the answer might not be in the top 25. Mitigated by strong semantic matching, source diversity, and per-member item counts (~335 messages, where K=25 captures ~7.5%). Falls back to full context-stuffing if the embedding API fails at query time.
 
-## 3. Single LLM call (entity resolution + answer combined)
+## 3. Pre-LLM entity resolution + single LLM call
 
-**Decision:** One Haiku call resolves the member name and answers the question.
+**Decision:** Resolve the member name with fuzzy matching before the LLM call, then answer in a single Gemini call.
 
-**Why:** Two sequential calls would consume ~2 seconds (the full latency budget). Combining them into one call halves latency. The member list is only 10 names (~50 tokens of overhead). The reasoning trace captures the resolution step for traceability.
+**Why:** Resolving before retrieval means only one member's data enters the context window. The LLM call handles answering, confidence scoring, and source citation in one pass. Self-references ("my", "me") fall back to the authenticated concierge. **Prod change:** entity resolution becomes trivial — the concierge is authenticated, so self-references resolve from the session and third-party lookups are scoped to their ~10-20 member portfolio.
 
 ## 4. Gemini 2.5 Flash on Vertex AI
 
-**Decision:** Use Gemini 2.5 Flash via Vertex AI over Claude Haiku / GPT-4o.
+**Decision:** Use Gemini 2.5 Flash via Vertex AI.
 
-**Why:** Fast inference (~1s for small contexts), free tier on Vertex AI, and the google-genai SDK supports both generation and embeddings — one client for both RAG and answering. Application Default Credentials mean no API key management; Cloud Run's service account gets Vertex AI access via IAM.
+**Why:** Fast inference (~1-3s), structured JSON output mode, and the google-genai SDK supports both generation and embeddings — one client for both RAG and answering. Application Default Credentials mean no API key management; Cloud Run's service account gets Vertex AI access via IAM. **Prod change:** add latency-based model routing — simple factual queries to Flash, complex cross-source reasoning to Flash with higher thinking budget or Pro.
 
 ## 5. Structured JSON output mode
 
@@ -44,7 +44,7 @@
 
 **Decision:** The LLM rates its own confidence following a rubric (1.0 = direct quote, 0.7-0.9 = inferred, 0.3-0.6 = weak, 0.0 = no data).
 
-**Why:** Logprobs aren't available on Haiku. A second LLM call for faithfulness scoring would blow the latency budget. Embedding similarity measures text similarity, not answer quality. A rubric makes the LLM's self-assessment directionally consistent — which is what the eval actually checks.
+**Why:** No logprobs available. A second LLM call for faithfulness scoring would blow the latency budget. Embedding similarity measures text similarity, not answer quality. A rubric makes the LLM's self-assessment directionally consistent — which is what the eval actually checks. **Prod change:** log confidence vs human feedback to calibrate the rubric over time.
 
 ## 8. Edge cases handled in prompt (no pre-LLM filtering)
 
