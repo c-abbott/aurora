@@ -1,9 +1,18 @@
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
-from data import DataStore, MemberProfile, _fetch_paginated, load_all
+from data import (
+    ConciergeProfile,
+    DataStore,
+    MemberProfile,
+    _fetch_paginated,
+    _render_items,
+    build_index,
+    load_all,
+    normalize,
+)
 
 
 def _mock_response(json_data: dict, status_code: int = 200) -> httpx.Response:
@@ -146,3 +155,98 @@ async def test_load_all_returns_fresh_datastore(mock_api):
     store2 = await load_all()
 
     assert store1 is not store2
+
+
+# -- Item rendering --
+
+
+def test_render_items_messages():
+    member = MemberProfile(
+        user_name="Alice",
+        messages=[{"id": "msg_1", "timestamp": "2025-01-01", "message": "Hello"}],
+    )
+    items = _render_items(member)
+    assert len(items) == 1
+    assert items[0].id == "msg_1"
+    assert items[0].source == "messages"
+    assert items[0].member == "Alice"
+    assert "[msg_1]" in items[0].text
+    assert "Hello" in items[0].text
+
+
+def test_render_items_all_sources():
+    member = MemberProfile(
+        user_name="James",
+        messages=[{"id": "msg_1", "timestamp": "2025-01-01", "message": "Hi"}],
+        calendar=[{"id": "evt_1", "start": "09:00", "end": "10:00", "title": "Meeting"}],
+        spotify=[{"stream_id": "sp_1", "timestamp": "08:00", "title": "Song"}],
+        whoop=[{
+            "date": "2025-01-01",
+            "recovery": {"score": 80, "hrv_ms": 65, "rhr_bpm": 50},
+            "sleep": {"duration_hours": 7.5, "quality_score": 75},
+            "strain": {"score": 10, "steps": 8000},
+        }],
+    )
+    items = _render_items(member)
+    assert len(items) == 4
+    assert {item.source for item in items} == {"messages", "calendar", "spotify", "whoop"}
+
+
+def test_render_items_empty_member():
+    member = MemberProfile(user_name="Ghost")
+    assert _render_items(member) == []
+
+
+# -- Vector normalization --
+
+
+def test_normalize_unit_vector():
+    vec = normalize([3.0, 4.0])
+    assert abs(vec[0] - 0.6) < 1e-9
+    assert abs(vec[1] - 0.8) < 1e-9
+
+
+def test_normalize_zero_vector():
+    vec = normalize([0.0, 0.0])
+    assert vec == [0.0, 0.0]
+
+
+def test_normalize_already_unit():
+    vec = normalize([1.0, 0.0, 0.0])
+    assert abs(vec[0] - 1.0) < 1e-9
+    assert vec[1] == 0.0
+
+
+# -- build_index --
+
+
+@pytest.mark.asyncio
+async def test_build_index_embeds_all_items():
+    store = DataStore(
+        concierge=ConciergeProfile(name="Alice", date_of_birth="1990-01-01", summary="Test"),
+    )
+    store.members["Alice"] = MemberProfile(
+        user_name="Alice",
+        messages=[
+            {"id": "msg_1", "timestamp": "2025-01-01", "message": "Hello"},
+            {"id": "msg_2", "timestamp": "2025-01-02", "message": "World"},
+        ],
+    )
+
+    e1, e2 = MagicMock(), MagicMock()
+    e1.values = [1.0, 0.0, 0.0]
+    e2.values = [0.0, 1.0, 0.0]
+    mock_embed_response = MagicMock()
+    mock_embed_response.embeddings = [e1, e2]
+
+    mock_client = MagicMock()
+    mock_client.aio.models.embed_content = AsyncMock(return_value=mock_embed_response)
+
+    with patch("data.genai.Client", return_value=mock_client):
+        await build_index(store, project="test", location="test")
+
+    assert len(store.members["Alice"].items) == 2
+    for item in store.members["Alice"].items:
+        assert len(item.vector) == 3
+        norm = sum(x * x for x in item.vector) ** 0.5
+        assert abs(norm - 1.0) < 1e-9

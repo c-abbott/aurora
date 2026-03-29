@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from data import ConciergeProfile, DataStore, MemberProfile
+from data import ConciergeProfile, DataItem, DataStore, MemberProfile, normalize
 from main import app
 
 
@@ -120,3 +120,42 @@ async def test_ask_missing_question():
         resp = await client.post("/ask", json={})
 
     assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_ask_with_rag_items():
+    """Full /ask request with pre-embedded items exercises RAG path."""
+    store = _make_store()
+    items = [
+        DataItem(
+            id="msg_1", source="messages",
+            text="[msg_1] 2025-01-01: Book me a table at Chez Janou in Paris",
+            member="Alice",
+            vector=normalize([1.0, 0.0, 0.0]),
+        ),
+    ]
+    store.members["Alice"].items = items
+
+    mock_response = _mock_json_response(
+        answer="Chez Janou in Paris.",
+        confidence=0.9,
+        sources=["msg_1"],
+        reasoning="Found via semantic retrieval.",
+    )
+
+    mock_embedding = MagicMock()
+    mock_embedding.values = [1.0, 0.0, 0.0]
+    mock_embed_response = MagicMock()
+    mock_embed_response.embeddings = [mock_embedding]
+
+    mock_client = MagicMock()
+    mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+    mock_client.aio.models.embed_content = AsyncMock(return_value=mock_embed_response)
+
+    app.state.data = store
+    with patch("prompt.genai.Client", return_value=mock_client):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post("/ask", json={"question": "What is Alice's favorite restaurant?"})
+
+    assert resp.status_code == 200
+    assert resp.json()["answer"] == "Chez Janou in Paris."

@@ -3,9 +3,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from data import ConciergeProfile, DataStore, MemberProfile
+from data import ConciergeProfile, DataItem, DataStore, MemberProfile, normalize
 from models import AskResponse, ResponseMetadata
-from prompt import _build_system_prompt, _format_member_data, _resolve_member, ask, RESPONSE_SCHEMA
+from prompt import (
+    RESPONSE_SCHEMA,
+    _build_system_prompt,
+    _dot_product,
+    _format_member_data,
+    _format_retrieved_data,
+    _resolve_member,
+    ask,
+)
 
 MEMBERS = [
     "Sophia Al-Farsi",
@@ -254,3 +262,105 @@ async def test_ask_handles_malformed_json():
 
     assert result.confidence == 0.0
     assert "unparseable" in result.metadata.reasoning
+
+
+# -- RAG retrieval --
+
+
+def test_dot_product():
+    assert _dot_product([1.0, 0.0], [0.0, 1.0]) == 0.0
+    assert _dot_product([1.0, 0.0], [1.0, 0.0]) == 1.0
+    assert abs(_dot_product([0.6, 0.8], [0.6, 0.8]) - 1.0) < 1e-9
+
+
+def test_format_retrieved_data():
+    items = [
+        DataItem(id="msg_1", source="messages", text="[msg_1] 2025-01-01: Hello", member="Alice"),
+        DataItem(id="evt_1", source="calendar", text="[evt_1] Meeting", member="Alice"),
+    ]
+    text = _format_retrieved_data("Alice", items)
+    assert "Retrieved data for Alice" in text
+    assert "[msg_1]" in text
+    assert "[evt_1]" in text
+
+
+def test_format_retrieved_data_empty():
+    text = _format_retrieved_data("Ghost", [])
+    assert "No data available" in text
+
+
+def _make_rag_store() -> DataStore:
+    """DataStore with embedded items for RAG testing."""
+    store = DataStore(
+        concierge=ConciergeProfile(name="Alice", date_of_birth="1990-01-01", summary="Test"),
+    )
+    items = [
+        DataItem(
+            id="msg_1", source="messages",
+            text="[msg_1] 2025-01-01: Book me a table at Chez Janou",
+            member="Alice",
+            vector=normalize([1.0, 0.0, 0.0]),
+        ),
+        DataItem(
+            id="msg_2", source="messages",
+            text="[msg_2] 2025-01-02: I love Italian food",
+            member="Alice",
+            vector=normalize([0.0, 1.0, 0.0]),
+        ),
+    ]
+    store.members["Alice"] = MemberProfile(
+        user_name="Alice",
+        messages=[
+            {"id": "msg_1", "timestamp": "2025-01-01", "message": "Book me a table at Chez Janou"},
+            {"id": "msg_2", "timestamp": "2025-01-02", "message": "I love Italian food"},
+        ],
+        items=items,
+    )
+    return store
+
+
+@pytest.mark.asyncio
+async def test_ask_uses_retrieval_when_items_exist():
+    store = _make_rag_store()
+    mock_response = _mock_json_response(
+        answer="Chez Janou",
+        confidence=0.95,
+        sources=["msg_1"],
+        reasoning="Found restaurant booking.",
+    )
+
+    mock_embedding = MagicMock()
+    mock_embedding.values = [1.0, 0.0, 0.0]
+    mock_embed_response = MagicMock()
+    mock_embed_response.embeddings = [mock_embedding]
+
+    mock_client = MagicMock()
+    mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+    mock_client.aio.models.embed_content = AsyncMock(return_value=mock_embed_response)
+
+    with patch("prompt.genai.Client", return_value=mock_client):
+        result = await ask("What is Alice's favorite restaurant?", store)
+
+    assert result.answer == "Chez Janou"
+    mock_client.aio.models.embed_content.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_ask_falls_back_on_embed_failure():
+    store = _make_rag_store()
+    mock_response = _mock_json_response(
+        answer="Chez Janou",
+        confidence=0.95,
+        sources=["msg_1"],
+        reasoning="Found restaurant booking.",
+    )
+
+    mock_client = MagicMock()
+    mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+    mock_client.aio.models.embed_content = AsyncMock(side_effect=RuntimeError("Embed API down"))
+
+    with patch("prompt.genai.Client", return_value=mock_client):
+        result = await ask("What is Alice's favorite restaurant?", store)
+
+    assert result.answer == "Chez Janou"
+    assert result.confidence == 0.95
