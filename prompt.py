@@ -69,17 +69,19 @@ def _resolve_member(
 
     best, best_score = None, 0
     for name in member_names:
-        for part in name.lower().split():
-            part = part.strip("-")
-            for w in words:
-                if w == part:
-                    score = 3
-                elif len(w) >= 3 and len(part) >= 3 and w[:3] == part[:3]:
-                    score = 2
-                else:
+        for raw_part in name.lower().split():
+            for part in raw_part.split("-"):
+                if not part:
                     continue
-                if score > best_score:
-                    best, best_score = name, score
+                for w in words:
+                    if w == part:
+                        score = 3
+                    elif len(w) >= 3 and len(part) >= 3 and w[:3] == part[:3]:
+                        score = 2
+                    else:
+                        continue
+                    if score > best_score:
+                        best, best_score = name, score
 
     if best_score >= 2:
         return best

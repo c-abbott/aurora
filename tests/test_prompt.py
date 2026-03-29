@@ -62,6 +62,15 @@ def test_resolve_case_insensitive():
     assert _resolve_member("what does SOPHIA think?", MEMBERS) == "Sophia Al-Farsi"
 
 
+def test_resolve_hyphenated_last_name():
+    assert _resolve_member("Tell me about El-Tahir", MEMBERS) == "Fatima El-Tahir"
+
+
+def test_resolve_hyphenated_partial():
+    # "Tahir" alone should match the "tahir" part of "El-Tahir"
+    assert _resolve_member("What does Tahir want?", MEMBERS) == "Fatima El-Tahir"
+
+
 def test_resolve_stopwords_ignored():
     # "the" should not match "El-Tahir", "can" should not match "Cavalli"
     assert _resolve_member("Can the person have this?", MEMBERS) is None
