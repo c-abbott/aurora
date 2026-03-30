@@ -114,9 +114,7 @@ def _build_system_prompt(concierge_summary: str) -> str:
 
 ## Edge Cases
 - If the user message says no member was resolved: confidence 0.0, explain in answer.
-- Member found but no relevant data for the question: confidence 0.0, explain.
-
-Always use the answer_question tool to respond."""
+- Member found but no relevant data for the question: confidence 0.0, explain."""
 
 
 def _format_member_data(member: MemberProfile) -> str:
@@ -266,7 +264,6 @@ async def ask(question: str, store: DataStore, client: genai.Client) -> AskRespo
             sources=[],
             metadata=ResponseMetadata(reasoning="Internal error processing the question."),
         )
-
     try:
         text = response.text
         args = json.loads(text)
