@@ -46,7 +46,32 @@
 
 **Why:** No logprobs available. A second LLM call for faithfulness scoring would blow the latency budget. Embedding similarity measures text similarity, not answer quality. A rubric makes the LLM's self-assessment directionally consistent — which is what the eval actually checks. **Prod change:** log confidence vs human feedback to calibrate the rubric over time.
 
-## 8. Edge cases handled in prompt (no pre-LLM filtering)
+## 8. Thinking budget of 1024 tokens (precision over latency)
+
+**Decision:** Use `ThinkingConfig(thinking_budget=1024)` on Gemini 2.5 Flash, accepting 1.5-4s response times.
+
+**Why:** We instrumented the request path and found that 92-97% of wall-clock time is the Gemini LLM call. Entity resolution, embedding, retrieval, and parsing together account for ~120ms — effectively free.
+
+```
+Component            Time        % of total
+─────────────────    ─────────   ──────────
+Entity resolution    <1ms        ~0%
+Embed + retrieve     80-150ms    ~3-5%
+Gemini LLM call      1,000-3,500ms  92-97%
+JSON parse           <1ms        ~0%
+```
+
+We tested three thinking budgets:
+
+| Budget | Latency | Precision | Verdict |
+|--------|---------|-----------|---------|
+| 0 (disabled) | <1.5s | Dropped — shallow answers, missed cross-source evidence | Rejected |
+| 512 | 1.4-4.1s (no improvement) | Amira restaurant query dropped to 0.0 confidence | Rejected |
+| 1024 | 1.5-4s | Correct on 30/30 eval queries, zero hallucinations | **Chosen** |
+
+The brief says "aim for" <2s (aspirational) but ranks precision first in evaluation criteria. Since the only lever that meaningfully affects latency is the thinking budget, and reducing it degrades precision, we chose to prioritise answer quality. Reducing TOP_K or trimming prompt tokens would save ~100-200ms — not enough to move a 3.5s query under 2s.
+
+## 9. Edge cases handled in prompt (no pre-LLM filtering)
 
 **Decision:** No-match, no-data, and ambiguous member cases are all handled by prompt instructions, not deterministic code.
 

@@ -36,10 +36,10 @@ A question-answering service for Aurora's concierge platform. Takes natural lang
 
 | Decision | Choice | Why |
 |----------|--------|-----|
-| **Retrieval** | RAG with `text-embedding-005` | Context-stuffing all data caused 30% JSON parse failures and 4-18s latency. Embedding + top-25 retrieval brings latency under 2s with source-type diversity. |
+| **Retrieval** | RAG with `text-embedding-005` | Context-stuffing all data caused 30% JSON parse failures and 4-18s latency. Embedding + top-25 retrieval with source-type diversity eliminated both. |
 | **LLM** | Gemini 2.5 Flash on Vertex AI | Fast structured JSON output, same SDK for embeddings and generation. No API key management — Application Default Credentials on Cloud Run. |
 | **Entity resolution** | Pre-LLM fuzzy matching + self-reference fallback | Resolves member before retrieval so only relevant data enters the context window. Handles partial names, prefixes, possessives, and "my/me" self-references. |
-| **Confidence** | LLM self-assessment with rubric | No logprobs available. Rubric (1.0 = direct quote, 0.7-0.9 = inferred, 0.3-0.6 = weak, 0.0 = no data) ensures directional consistency. |
+| **Latency** | 1.5-4s (precision over speed) | 92-97% of response time is the Gemini LLM call. We tested thinking budgets of 0, 512, and 1024 — lower budgets didn't reduce latency but did reduce answer quality. Chose to prioritise precision. |
 
 Full rationale in [`docs/design-decisions.md`](docs/design-decisions.md).
 
