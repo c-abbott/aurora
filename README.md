@@ -99,45 +99,50 @@ uv run pytest
 
 The core problem Aurora is solving is **taste and judgment** — knowing that Lorenzo prefers pasta over sushi, that Sophia wants Château Latour not "a nice red," that Fatima's travel style is adventurous not resort-based. That knowledge lives in a context graph with layers optimised for different access patterns:
 
-- **Hot layer** (Redis cluster or a feature store like Feast) — current location, calendar state, latest wearable readings. Sub-ms reads, always included in every LLM context window. Updated via event streams — calendar webhooks, wearable API polling, mobile location pings. ~1KB per member, fits entirely in memory
-- **Cold layer** (Postgres with read replicas) — structured preferences, dietary restrictions, loyalty memberships, the derived preference "brief" (see Compounding memory below). Indexed SQL queries, no embeddings needed. "What's Lorenzo's dietary preference?" is a `WHERE member_id = ?` lookup, not a vector search. ~50KB per member at scale
-- **Deep layer** (pgvector on Postgres to start, Pinecone or Qdrant when index size exceeds single-node RAM) — full conversation history and interaction logs. This is where embeddings earn their keep — finding "that Italian restaurant they loved in Rome last March" from thousands of interactions. Pre-filtered ANN search scoped by `member_id` partition, HNSW indexing, incremental upserts
+- **Hot layer** (Redis cluster or a feature store like Feast) — the real-time state of a member: current location, calendar for today, latest wearable readings. These are small (~1KB per member), fit entirely in memory, and are read in under a millisecond. They're always included in every LLM prompt because they're cheap to fetch and provide essential context (e.g., "the member is currently in Tokyo" changes which restaurants to suggest). Updated continuously via event streams — calendar webhooks, wearable API polling, mobile location pings
+- **Cold layer** (Postgres with read replicas) — structured, queryable member data: dietary restrictions, loyalty memberships, airline preferences, the derived preference "brief" (see Compounding memory below). These don't need embeddings — "What's Lorenzo's dietary preference?" is a `WHERE member_id = ?` SQL query, not a similarity search. ~50KB per member at scale
+- **Deep layer** (pgvector on Postgres to start, migrating to Pinecone or Qdrant when the index exceeds single-node RAM) — the full conversation history and interaction logs, where every message and event is stored alongside its embedding vector. This is where semantic search earns its keep — when a concierge needs to find "that Italian restaurant they loved in Rome last March" from thousands of interactions, exact keyword matching fails but vector similarity finds it. Queries are scoped to a single member's partition using pre-filtered ANN (approximate nearest neighbour) search with HNSW indexing, and new items are upserted incrementally as they arrive
 
-Item growth is non-linear — long-tenured members accumulate more data types and message volume compounds. At 20-50K items per member, that's **2-5 billion vectors at 768 dimensions = 6-15TB of index**. Initial embedding cost: ~$2-5K one-time using a batch embedding API. Incremental cost is negligible — a few hundred new items per member per month.
+Not every query needs to touch every layer. A simple factual question hits the cold layer and returns in milliseconds. A nuanced question about past experiences searches the deep layer. The query classifier (see Agentic retrieval) routes to the right layer.
+
+Item growth is non-linear — long-tenured members accumulate more data types over time and message volume compounds as trust builds. A conservative estimate is 20-50K items per member, giving **2-5 billion vectors at 768 dimensions = 6-15TB of index**. Initial embedding cost: ~$2-5K one-time using a batch embedding API. Incremental cost is negligible — a few hundred new items per member per month.
 
 ### Streaming ingestion
 
-Member signals (messages, calendar changes, wearable syncs, location updates) publish to a durable message queue (Kafka for ordering guarantees, or SQS/Pub/Sub for simplicity). A consumer service:
+The current system fetches all data on startup — viable at 4K items, impossible at 2-5 billion. Instead, member signals flow through a durable message queue (Kafka if you need strict ordering guarantees, SQS or Pub/Sub for simpler operations). When a member sends a message, updates their calendar, or syncs their wearable, that event publishes to the queue. A consumer service then:
 
-1. Writes the raw event to the interaction log (Postgres, append-only)
-2. Embeds the text payload via a batch-aware embedding service (buffers for ~100ms to amortise API calls, flushes on timeout or batch-full)
-3. Upserts the vector into the deep layer, partitioned by `member_id`
-4. Updates the hot layer if the event affects real-time state (location, calendar)
+1. Writes the raw event to the interaction log (Postgres, append-only) — this is the permanent record
+2. Embeds the text content by batching events together (~100ms buffer window, flushed on timeout or batch-full) to amortise the cost of embedding API calls
+3. Upserts the resulting vector into the deep layer, partitioned by `member_id`
+4. Updates the hot layer if the event affects real-time state (e.g., a new calendar event or a location change)
 
-Consistency model: **eventually consistent**, typically <500ms end-to-end from event to queryable vector. The hot layer is updated synchronously on the write path — a query immediately after a calendar change will see the new state. The deep layer has a short lag from the embedding step. A batch backfill pipeline handles historical data, re-embedding after model upgrades, and recovery from consumer failures (replay from the queue's retention window).
+The consistency model is **eventually consistent** — typically <500ms from event to queryable vector. The hot layer updates synchronously (a query immediately after a calendar change sees the new state), while the deep layer has a short lag from the embedding step. For failure recovery, the queue retains events for a configurable window, allowing the consumer to replay and backfill. The same backfill pipeline handles historical data imports and re-embedding when the embedding model is upgraded.
 
 ### Agentic retrieval and model routing
 
-At 20-50K items per member, the current flat top-25 retrieval captures <0.1% of history. The retrieval layer becomes an [orchestration agent](https://www.anthropic.com/engineering/building-effective-agents) that reasons about *how* to search:
+At 20-50K items per member, the current flat top-25 retrieval captures <0.1% of a member's history. The retrieval layer needs to become smarter — instead of always running the same vector search, it should reason about *how* to search based on what's being asked. This follows the [orchestrator-worker pattern](https://www.anthropic.com/engineering/building-effective-agents) where a lightweight orchestrator classifies the query and dispatches the right retrieval strategy:
 
-- **Query classification** (lightweight model or structured output from a fast LLM call, ~50ms) — determines query type and routes to the right storage layer. Simple factual queries ("dietary preference?") hit the cold layer directly and skip embeddings entirely. Temporal queries ("last Tuesday") apply date-range filters as pre-filters on the ANN index. Cross-source queries ("how did sleep affect meetings?") issue parallel retrievals across data types with temporal alignment
-- **Two-stage retrieval** on the deep layer — coarse ANN returns top-100 candidates (~20ms with HNSW), a cross-encoder re-ranks to top-25 (~100ms). Total retrieval budget: <200ms
-- **Model routing** by classified query complexity:
-  - Simple factual → fast model, minimal thinking budget, **<1s end-to-end**
+- **Query classification** (~50ms, using a fast LLM call with structured output or a fine-tuned classifier) determines the query type and routes to the appropriate storage layer:
+  - Simple factual ("What's Lorenzo's dietary preference?") → cold layer SQL lookup, no embeddings, <50ms
+  - Temporal ("What did Amina do last Tuesday?") → date-range filter applied *before* the vector search on the deep layer, narrowing candidates before similarity matching
+  - Cross-source ("How did James's sleep affect his meeting performance?") → parallel retrievals across wearable and calendar data types, aligned by date, then merged
+- **Two-stage retrieval** for deep layer queries — a coarse ANN pass returns the top-100 candidates quickly (~20ms with HNSW indexing), then a cross-encoder (a model that scores query-document pairs more accurately than embedding similarity alone) re-ranks them to select the best 25 (~100ms). This dramatically improves recall without increasing the LLM context window. Total retrieval budget: <200ms
+- **Model routing** — the same query classification determines which LLM to use. Not every question needs a frontier model with a large thinking budget:
+  - Simple factual → fast model, minimal thinking, **<1s end-to-end**
   - Multi-evidence reasoning → mid-tier model, moderate budget, **1-2s**
   - Cross-source synthesis → frontier model, full thinking budget, **2-4s**
   - This solves today's 1.5-4s uniform latency by making the common case (estimated ~60% of queries) fast
 
 ### Compounding memory
 
-Every interaction produces signal — explicit ("I don't like spicy food"), implicit (consistently chooses window seats), and negative (ignores repeated cocktail bar suggestions). This is what makes a concierge better over time:
+A concierge that doesn't learn from past interactions is just a search engine. Every interaction produces signal — explicit ("I don't like spicy food"), implicit (consistently chooses window seats over aisle), and negative (ignores repeated cocktail bar suggestions). The architecture needs to capture all three and make them retrievable:
 
-- **Raw interaction log** (Postgres, append-only) — every message, recommendation, booking, acceptance, rejection, rating. The source of truth. Partitioned by member, retained indefinitely
-- **Derived preference model** — a structured member "brief" (~500-1000 tokens) that summarises tastes, patterns, and constraints. What a new human concierge would read before their first shift. Rebuilt periodically by an LLM job: "given these N recent interactions, update this member's preference brief." Decay-weighted so recent signals outweigh historical ones. Stored in the cold layer, always retrieved into the LLM context window
-- **Active override layer** — explicit corrections from the member or curator that take immediate effect and persist until the next preference rebuild incorporates them
+- **Raw interaction log** (Postgres, append-only, partitioned by member) — every message, recommendation, booking, acceptance, rejection, and rating. This is the immutable source of truth, retained indefinitely
+- **Derived preference model** — a structured member "brief" (~500-1000 tokens) that distils years of interactions into a summary of tastes, patterns, and constraints. Think of it as the document a new human concierge would read before their first shift with a member. It's rebuilt periodically by an LLM job ("given these N recent interactions, update this member's preference brief"), with decay weighting so recent signals matter more than historical ones — a member who went vegan six months ago shouldn't still get steakhouse recommendations. Stored in the cold layer, always included in the LLM context window
+- **Active override layer** — explicit corrections from the member ("actually I've started eating meat again") or curator that take immediate effect and persist until the next preference rebuild incorporates them
 
-The preference brief is the critical abstraction — it compresses years of interaction history into a retrievable document that fits in a context window. The LLM provides reasoning; taste comes from what you put in front of it.
+The preference brief is the critical abstraction — it compresses years of interaction history into a document that fits in a context window. The LLM provides reasoning; taste comes from what you put in front of it.
 
 ### What stays the same
 
-The core architecture — embed, retrieve, generate — remains intact. Entity resolution becomes trivial: in production the concierge is authenticated, so self-references resolve from the session and third-party lookups are scoped to the concierge's member portfolio (~10-20 people).
+The core architecture — embed, retrieve, generate — remains intact
