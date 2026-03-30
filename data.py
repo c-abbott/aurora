@@ -33,7 +33,7 @@ class MemberProfile:
 
 
 @dataclass
-class ConciergeProfile:
+class PrimaryMember:
     name: str
     date_of_birth: str
     summary: str
@@ -42,7 +42,7 @@ class ConciergeProfile:
 @dataclass
 class DataStore:
     members: dict[str, MemberProfile] = field(default_factory=dict)
-    concierge: ConciergeProfile | None = None
+    primary_member: PrimaryMember | None = None
 
 
 async def _fetch_paginated(client: httpx.AsyncClient, path: str) -> list[dict]:
@@ -62,18 +62,18 @@ async def _fetch_paginated(client: httpx.AsyncClient, path: str) -> list[dict]:
     return items
 
 
-async def _fetch_me(client: httpx.AsyncClient) -> ConciergeProfile:
+async def _fetch_me(client: httpx.AsyncClient) -> PrimaryMember:
     resp = await client.get(f"{BASE_URL}/hackathon/me/")
     resp.raise_for_status()
     data = resp.json()
-    return ConciergeProfile(**data)
+    return PrimaryMember(**data)
 
 
 async def load_all() -> DataStore:
     for attempt in range(3):
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
-                concierge, messages, calendar, spotify, whoop = await asyncio.gather(
+                primary_member, messages, calendar, spotify, whoop = await asyncio.gather(
                     _fetch_me(client),
                     _fetch_paginated(client, "/messages/"),
                     _fetch_paginated(client, "/hackathon/calendar-events/"),
@@ -87,7 +87,7 @@ async def load_all() -> DataStore:
             logger.warning("Data fetch attempt %d failed, retrying...", attempt + 1)
             await asyncio.sleep(1)
 
-    store = DataStore(concierge=concierge)
+    store = DataStore(primary_member=primary_member)
 
     for msg in messages:
         name = msg["user_name"]
@@ -95,12 +95,12 @@ async def load_all() -> DataStore:
             store.members[name] = MemberProfile(user_name=name)
         store.members[name].messages.append(msg)
 
-    # Calendar, Spotify, and Whoop belong to the concierge (identified via /me).
-    if concierge.name not in store.members:
-        store.members[concierge.name] = MemberProfile(user_name=concierge.name)
-    store.members[concierge.name].calendar = calendar
-    store.members[concierge.name].spotify = spotify
-    store.members[concierge.name].whoop = whoop
+    # Calendar, Spotify, and Whoop belong to the primary member (identified via /me).
+    if primary_member.name not in store.members:
+        store.members[primary_member.name] = MemberProfile(user_name=primary_member.name)
+    store.members[primary_member.name].calendar = calendar
+    store.members[primary_member.name].spotify = spotify
+    store.members[primary_member.name].whoop = whoop
 
     logger.info(
         "Loaded %d members, %d messages, %d calendar events, %d spotify streams, %d whoop records",

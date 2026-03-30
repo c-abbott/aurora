@@ -6,13 +6,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from data import ConciergeProfile, DataItem, DataStore, MemberProfile, normalize
+from data import PrimaryMember, DataItem, DataStore, MemberProfile, normalize
 from main import app
 
 
 def _make_store() -> DataStore:
     store = DataStore(
-        concierge=ConciergeProfile(name="Alice", date_of_birth="1990-01-01", summary="Test"),
+        primary_member=PrimaryMember(name="Alice", date_of_birth="1990-01-01", summary="Test"),
     )
     store.members["Alice"] = MemberProfile(
         user_name="Alice",

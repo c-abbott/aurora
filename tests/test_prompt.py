@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from data import ConciergeProfile, DataItem, DataStore, MemberProfile, normalize
+from data import PrimaryMember, DataItem, DataStore, MemberProfile, normalize
 from models import AskResponse, ResponseMetadata
 from prompt import (
     RESPONSE_SCHEMA,
@@ -77,19 +77,19 @@ def test_resolve_stopwords_ignored():
 
 
 def test_resolve_self_reference_my():
-    assert _resolve_member("What is my sleep score?", MEMBERS, concierge_name="James Fletcher") == "James Fletcher"
+    assert _resolve_member("What is my sleep score?", MEMBERS, primary_member_name="James Fletcher") == "James Fletcher"
 
 
 def test_resolve_self_reference_me():
-    assert _resolve_member("Tell me about me", MEMBERS, concierge_name="James Fletcher") == "James Fletcher"
+    assert _resolve_member("Tell me about me", MEMBERS, primary_member_name="James Fletcher") == "James Fletcher"
 
 
 def test_resolve_name_takes_priority_over_self_reference():
     # "my" is a self-reference, but "Sophia" is an explicit name match
-    assert _resolve_member("What is my friend Sophia's favorite?", MEMBERS, concierge_name="James Fletcher") == "Sophia Al-Farsi"
+    assert _resolve_member("What is my friend Sophia's favorite?", MEMBERS, primary_member_name="James Fletcher") == "Sophia Al-Farsi"
 
 
-def test_resolve_self_reference_without_concierge():
+def test_resolve_self_reference_without_primary_member():
     assert _resolve_member("What is my sleep score?", MEMBERS) is None
 
 
@@ -167,12 +167,12 @@ def test_format_member_data_whoop():
 
 
 def test_system_prompt_includes_rubric():
-    prompt = _build_system_prompt("Test concierge")
+    prompt = _build_system_prompt("Test primary member")
     assert "1.0" in prompt
     assert "0.0" in prompt
 
 
-def test_system_prompt_includes_concierge_context():
+def test_system_prompt_includes_primary_member_context():
     prompt = _build_system_prompt("Founder and CEO")
     assert "Founder and CEO" in prompt
 
@@ -182,7 +182,7 @@ def test_system_prompt_includes_concierge_context():
 
 def _make_store() -> DataStore:
     store = DataStore(
-        concierge=ConciergeProfile(name="Alice", date_of_birth="1990-01-01", summary="Test"),
+        primary_member=PrimaryMember(name="Alice", date_of_birth="1990-01-01", summary="Test"),
     )
     store.members["Alice"] = MemberProfile(
         user_name="Alice",
@@ -314,7 +314,7 @@ def test_format_retrieved_data_empty():
 def _make_rag_store() -> DataStore:
     """DataStore with embedded items for RAG testing."""
     store = DataStore(
-        concierge=ConciergeProfile(name="Alice", date_of_birth="1990-01-01", summary="Test"),
+        primary_member=PrimaryMember(name="Alice", date_of_birth="1990-01-01", summary="Test"),
     )
     items = [
         DataItem(

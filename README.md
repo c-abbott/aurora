@@ -64,7 +64,7 @@ curl -s -X POST https://aurora-1052079892687.europe-west1.run.app/ask \
   -H "Content-Type: application/json" \
   -d '{"question": "Has Soph mentioned any restaurants?"}' | python3 -m json.tool
 
-# Self-reference — "my" resolves to the concierge (James Fletcher)
+# Self-reference — "my" resolves to the primary member (James Fletcher)
 curl -s -X POST https://aurora-1052079892687.europe-west1.run.app/ask \
   -H "Content-Type: application/json" \
   -d '{"question": "How many steps did I take last week?"}' | python3 -m json.tool

@@ -60,7 +60,7 @@ _SELF_REFERENCES = frozenset({"my", "me", "i", "i'm", "i've", "mine", "myself"})
 def _resolve_member(
     question: str,
     member_names: list[str],
-    concierge_name: str | None = None,
+    primary_member_name: str | None = None,
 ) -> str | None:
     """Best-effort fuzzy match of a member name from the question."""
     tokens = re.findall(r"[\w'\u2019]+", question.lower())
@@ -86,19 +86,19 @@ def _resolve_member(
     if best_score >= 2:
         return best
 
-    # Fallback: self-references resolve to the concierge
-    if concierge_name and concierge_name in member_names:
+    # Fallback: self-references resolve to the primary member
+    if primary_member_name and primary_member_name in member_names:
         if any(t in _SELF_REFERENCES for t in tokens):
-            return concierge_name
+            return primary_member_name
 
     return None
 
 
-def _build_system_prompt(concierge_summary: str) -> str:
-    return f"""You are Aurora's concierge assistant. Answer questions about members using ONLY the provided data.
+def _build_system_prompt(primary_member_summary: str) -> str:
+    return f"""You are Aurora, a premium concierge assistant. Answer questions about members using ONLY the provided data.
 
-## Concierge Context
-{concierge_summary}
+## Primary Member
+{primary_member_summary}
 
 ## Instructions
 1. The user message tells you which member was resolved and provides their data, filtered for relevance to the question. The resolution uses fuzzy name matching, so the name in the question may differ slightly from the member's actual name (e.g., "Amira" matches "Amina"). Trust the resolution and answer using the resolved member's data.
@@ -220,11 +220,11 @@ def _format_retrieved_data(member_name: str, items: list[DataItem]) -> str:
 async def ask(question: str, store: DataStore, client: genai.Client) -> AskResponse:
     """Answer a question using member data and a single Gemini call."""
     member_names = list(store.members.keys())
-    concierge_name = store.concierge.name if store.concierge else None
-    resolved = _resolve_member(question, member_names, concierge_name)
+    primary_member_name = store.primary_member.name if store.primary_member else None
+    resolved = _resolve_member(question, member_names, primary_member_name)
     member = store.members.get(resolved) if resolved else None
 
-    system = _build_system_prompt(store.concierge.summary)
+    system = _build_system_prompt(store.primary_member.summary)
 
     user_parts = [f"Question: {question}"]
     if member:

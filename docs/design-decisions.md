@@ -10,7 +10,7 @@
 
 **Decision:** Embed all data items at startup using `text-embedding-005`, retrieve top-25 items per query via cosine similarity with source-type diversity.
 
-**Why:** Context-stuffing the concierge member's full profile (~500+ items across messages, calendar, spotify, whoop) caused 30% malformed JSON responses and 4-18s latency. RAG reduces context to ~25 items, eliminating parse failures and reducing latency to 1.5-4s (see decision #8 for the latency breakdown). Pre-normalized vectors enable pure-Python dot-product similarity with no external dependencies.
+**Why:** Context-stuffing the primary member's full profile (~500+ items across messages, calendar, spotify, whoop) caused 30% malformed JSON responses and 4-18s latency. RAG reduces context to ~25 items, eliminating parse failures and reducing latency to 1.5-4s (see decision #8 for the latency breakdown). Pre-normalized vectors enable pure-Python dot-product similarity with no external dependencies.
 
 **Source-type diversity:** Retrieval guarantees at least one item from each data source (messages, calendar, spotify, whoop) before filling remaining slots by relevance score. This prevents high-volume sources (messages) from crowding out cross-source evidence.
 
@@ -20,7 +20,7 @@
 
 **Decision:** Resolve the member name with fuzzy matching before the LLM call, then answer in a single Gemini call.
 
-**Why:** Resolving before retrieval means only one member's data enters the context window. The LLM call handles answering, confidence scoring, and source citation in one pass. Self-references ("my", "me") fall back to the authenticated concierge. **Prod change:** entity resolution becomes trivial — the concierge is authenticated, so self-references resolve from the session and third-party lookups are scoped to their ~10-20 member portfolio.
+**Why:** Resolving before retrieval means only one member's data enters the context window. The LLM call handles answering, confidence scoring, and source citation in one pass. Self-references ("my", "me") fall back to the primary member (identified via `/me`). **Prod change:** entity resolution becomes trivial — the member is authenticated, so self-references resolve from the session and third-party lookups are scoped to their ~10-20 contact portfolio.
 
 ## 4. Gemini 2.5 Flash on Vertex AI
 

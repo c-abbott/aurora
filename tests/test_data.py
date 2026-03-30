@@ -4,7 +4,7 @@ import httpx
 import pytest
 
 from data import (
-    ConciergeProfile,
+    PrimaryMember,
     DataStore,
     MemberProfile,
     _fetch_paginated,
@@ -122,7 +122,7 @@ async def test_load_all_groups_messages_by_member(mock_api):
 
 
 @pytest.mark.asyncio
-async def test_load_all_assigns_personal_data_to_concierge(mock_api):
+async def test_load_all_assigns_personal_data_to_primary_member(mock_api):
     store = await load_all()
 
     alice = store.members["Alice"]
@@ -142,11 +142,11 @@ async def test_load_all_other_members_have_no_personal_data(mock_api):
 
 
 @pytest.mark.asyncio
-async def test_load_all_sets_concierge_profile(mock_api):
+async def test_load_all_sets_primary_member_profile(mock_api):
     store = await load_all()
 
-    assert store.concierge.name == "Alice"
-    assert store.concierge.date_of_birth == "1990-01-01"
+    assert store.primary_member.name == "Alice"
+    assert store.primary_member.date_of_birth == "1990-01-01"
 
 
 @pytest.mark.asyncio
@@ -207,9 +207,9 @@ async def test_load_all_raises_after_max_retries(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_load_all_concierge_without_messages(monkeypatch):
-    """Concierge who has no messages still gets a profile with personal data."""
-    messages = _make_messages("Bob")  # Only Bob has messages, not the concierge
+async def test_load_all_primary_member_without_messages(monkeypatch):
+    """Primary member who has no messages still gets a profile with personal data."""
+    messages = _make_messages("Bob")  # Only Bob has messages, not the primary member
     me = {"name": "Alice", "date_of_birth": "1990-01-01", "summary": "Test"}
     calendar = [{"id": "evt_1", "title": "Standup"}]
 
@@ -301,7 +301,7 @@ def test_normalize_already_unit():
 @pytest.mark.asyncio
 async def test_build_index_embeds_all_items():
     store = DataStore(
-        concierge=ConciergeProfile(name="Alice", date_of_birth="1990-01-01", summary="Test"),
+        primary_member=PrimaryMember(name="Alice", date_of_birth="1990-01-01", summary="Test"),
     )
     store.members["Alice"] = MemberProfile(
         user_name="Alice",
