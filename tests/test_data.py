@@ -157,6 +157,84 @@ async def test_load_all_returns_fresh_datastore(mock_api):
     assert store1 is not store2
 
 
+@pytest.mark.asyncio
+async def test_load_all_retries_on_http_error(monkeypatch):
+    """load_all retries on transient HTTP errors and succeeds on the second attempt."""
+    messages = _make_messages("Alice")
+    me = {"name": "Alice", "date_of_birth": "1990-01-01", "summary": "Test"}
+    empty = {"total": 0, "items": []}
+
+    call_count = 0
+
+    async def mock_get(url, params=None):
+        nonlocal call_count
+        call_count += 1
+        if call_count <= 5:  # First gather (5 concurrent calls) all fail
+            raise httpx.TimeoutException("timeout")
+        path = str(url)
+        if "/hackathon/me/" in path:
+            return _mock_response(me)
+        if "/messages/" in path:
+            return _mock_response({"total": 1, "items": messages})
+        return _mock_response(empty)
+
+    mock_client = AsyncMock(spec=httpx.AsyncClient)
+    mock_client.get.side_effect = mock_get
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    monkeypatch.setattr("data.httpx.AsyncClient", lambda **kwargs: mock_client)
+    monkeypatch.setattr("data.asyncio.sleep", AsyncMock())
+
+    store = await load_all()
+    assert "Alice" in store.members
+
+
+@pytest.mark.asyncio
+async def test_load_all_raises_after_max_retries(monkeypatch):
+    """load_all raises after 3 failed attempts."""
+    async def mock_get(url, params=None):
+        raise httpx.TimeoutException("timeout")
+
+    mock_client = AsyncMock(spec=httpx.AsyncClient)
+    mock_client.get.side_effect = mock_get
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    monkeypatch.setattr("data.httpx.AsyncClient", lambda **kwargs: mock_client)
+    monkeypatch.setattr("data.asyncio.sleep", AsyncMock())
+
+    with pytest.raises(httpx.TimeoutException):
+        await load_all()
+
+
+@pytest.mark.asyncio
+async def test_load_all_concierge_without_messages(monkeypatch):
+    """Concierge who has no messages still gets a profile with personal data."""
+    messages = _make_messages("Bob")  # Only Bob has messages, not the concierge
+    me = {"name": "Alice", "date_of_birth": "1990-01-01", "summary": "Test"}
+    calendar = [{"id": "evt_1", "title": "Standup"}]
+
+    async def mock_get(url, params=None):
+        path = str(url)
+        if "/hackathon/me/" in path:
+            return _mock_response(me)
+        if "/messages/" in path:
+            return _mock_response({"total": len(messages), "items": messages})
+        if "/calendar-events/" in path:
+            return _mock_response({"total": 1, "items": calendar})
+        return _mock_response({"total": 0, "items": []})
+
+    mock_client = AsyncMock(spec=httpx.AsyncClient)
+    mock_client.get.side_effect = mock_get
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    monkeypatch.setattr("data.httpx.AsyncClient", lambda **kwargs: mock_client)
+
+    store = await load_all()
+    assert "Alice" in store.members
+    assert store.members["Alice"].calendar == calendar
+    assert store.members["Alice"].messages == []
+
+
 # -- Item rendering --
 
 
