@@ -22,6 +22,7 @@ MEMBERS = [
     "Amina Van Den Berg",
     "James Fletcher",
     "Lorenzo Cavalli",
+    "Hans Müller",
 ]
 
 
@@ -69,6 +70,14 @@ def test_resolve_hyphenated_last_name():
 def test_resolve_hyphenated_partial():
     # "Tahir" alone should match the "tahir" part of "El-Tahir"
     assert _resolve_member("What does Tahir want?", MEMBERS) == "Fatima El-Tahir"
+
+
+def test_resolve_umlaut_without_accent():
+    assert _resolve_member("What does Muller prefer?", MEMBERS) == "Hans Müller"
+
+
+def test_resolve_umlaut_with_accent():
+    assert _resolve_member("What does Müller prefer?", MEMBERS) == "Hans Müller"
 
 
 def test_resolve_stopwords_ignored():

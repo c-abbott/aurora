@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import unicodedata
 
 from google import genai
 from google.genai import types as genai_types
@@ -57,6 +58,13 @@ _STOPWORDS = frozenset({
 _SELF_REFERENCES = frozenset({"my", "me", "i", "i'm", "i've", "mine", "myself"})
 
 
+def _strip_accents(s: str) -> str:
+    """Remove diacritics: ü→u, é→e, etc."""
+    return "".join(
+        c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn"
+    )
+
+
 def _resolve_member(
     question: str,
     member_names: list[str],
@@ -64,12 +72,12 @@ def _resolve_member(
 ) -> str | None:
     """Best-effort fuzzy match of a member name from the question."""
     tokens = re.findall(r"[\w'\u2019]+", question.lower())
-    words = [t.removesuffix("'s").removesuffix("\u2019s") for t in tokens]
+    words = [_strip_accents(t.removesuffix("'s").removesuffix("\u2019s")) for t in tokens]
     words = [w for w in words if len(w) >= 3 and w not in _STOPWORDS]
 
     best, best_score = None, 0
     for name in member_names:
-        for raw_part in name.lower().split():
+        for raw_part in _strip_accents(name.lower()).split():
             for part in raw_part.split("-"):
                 if not part:
                     continue
