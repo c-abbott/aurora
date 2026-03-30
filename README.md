@@ -93,16 +93,36 @@ uv run pytest
 
 > *If you were to scale this to 100,000 members with 10 years of history each, what would be the first architectural change?*
 
-**Replace the in-memory vector index with a dedicated vector database.**
+**Replace the in-memory vector index with a dedicated vector database.** This is the first change because it unblocks everything else — but at Aurora's scale, the Q&A service is really one component of a broader member intelligence system. Here's how the architecture evolves to support that.
 
-At 100K members with 10 years of history, the dataset grows from ~4K items to roughly 1 billion (~10K items/member). The in-memory index — currently ~500KB — becomes ~3TB of 768-dim vectors. That doesn't fit in a single process.
+### The member context graph
 
-A purpose-built vector store (pgvector, Qdrant, or Vertex AI Vector Search) gives you:
+The core problem Aurora is solving is **taste and judgment** — knowing that Lorenzo prefers pasta over sushi, that Sophia wants Château Latour not "a nice red," that Fatima's travel style is adventurous not resort-based. That knowledge lives in a context graph with layers optimised for different access patterns:
 
-- **ANN search** for sub-100ms retrieval at billion scale, replacing the current O(n) brute-force scan
-- **Pre-filtered search** — filter by `member_id` first, so retrieval cost scales with per-member item count (~10K), not total corpus size
-- **Incremental indexing** — embed and upsert new items without reprocessing the full corpus
+- **Hot layer** (Redis or a feature store) — current location, calendar state, latest wearable readings. Sub-ms reads, always included in context. Updated continuously via event streams from mobile, calendar webhooks, wearable APIs
+- **Cold layer** (Postgres) — structured preferences, dietary restrictions, loyalty memberships. SQL queries, no embeddings. "What's Lorenzo's dietary preference?" never needs a vector store
+- **Deep layer** (pgvector to start, Pinecone or Qdrant at scale) — full conversation history and interaction logs. This is where embeddings earn their keep — finding "that Italian restaurant they loved in Rome last March" from thousands of interactions. Pre-filtered ANN search by `member_id`, incremental indexing
 
-This is the first change because it unblocks everything else. Once the vector store exists, startup fetch becomes streaming ingestion (webhooks/change streams upsert into the store, the app server becomes stateless), and the application server scales horizontally with no shared state.
+Item growth is non-linear — long-tenured members accumulate more data types and message volume compounds. At 20-50K items per member, that's 2-5 billion items and 6-15TB of vectors. Member signals (messages, calendar changes, wearable syncs, location updates) flow into the graph via a message queue (Kafka, SQS, Pub/Sub), embedded and upserted in real-time.
 
-Entity resolution stays simple: in production the concierge is authenticated, so self-references resolve from the session. Third-party references ("What's Sophia's schedule?") match against the concierge's member portfolio (~10-20 people) — prefix matching works fine at that cardinality.
+### Agentic retrieval and model routing
+
+At 20-50K items per member, the current flat top-25 retrieval captures <0.1% of history. The retrieval layer becomes an [orchestration agent](https://www.anthropic.com/engineering/building-effective-agents) that reasons about *how* to search:
+
+- A query classifier routes to the right layer — temporal queries apply date filters before semantic search, simple factual queries hit the cold layer directly, cross-source queries ("how did sleep affect meeting performance?") retrieve with temporal alignment
+- Two-stage retrieval on the deep layer — coarse ANN returns top-100, a cross-encoder re-ranks to 25
+- Model routing by query complexity: simple factual → fast model, <1s; multi-evidence → mid-tier; cross-source synthesis → frontier model with full thinking budget. This solves today's 1.5-4s latency by making the common case fast
+
+### Compounding memory
+
+Every interaction produces signal — explicit ("I don't like spicy food"), implicit (consistently chooses window seats), and negative (ignores repeated cocktail bar suggestions). This is what makes a concierge better over time, and the architecture needs to support it:
+
+- **Raw interaction log** — append-only, the source of truth
+- **Derived preference model** — periodically rebuilt from the log with decay weighting (recent > historical). This is a member "brief" — what a new human concierge would read before their first shift. The rebuild is itself an LLM job: "given these 50 recent interactions, update this member's preference brief"
+- **Active override layer** — explicit corrections from the member or curator that take immediate effect
+
+The preference brief is what gets retrieved into the context window. The LLM provides reasoning; taste comes from what you put in front of it.
+
+### What stays the same
+
+The core pattern — embed, retrieve, generate — remains intact. Entity resolution stays simple: in production the concierge is authenticated, so self-references resolve from the session and third-party lookups are scoped to ~10-20 members.
